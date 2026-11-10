@@ -1,0 +1,4 @@
+flask==3.1.*
+requests==2.32.*
+pillow==11.*
+pillow-heif==1.*

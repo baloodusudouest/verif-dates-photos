@@ -1,0 +1,726 @@
+#!/usr/bin/env python3
+"""
+Vérification des dates de la Pellicule avant migration vers le stockage Immich.
+
+- Analyse les fichiers de <LOCAL_ROOT>/<SCAN_SUBDIR> avec exiftool
+- Compare la date de prise de vue à la date du dossier (AAAA-MM-JJ, sinon AAAA-MM, sinon AAAA)
+- Lit aussi la date contenue dans le nom du fichier (IMG_20190714_153000, 2008-08-10-014136052…) :
+  elle devient la date proposée si elle concorde avec le dossier, sinon la photo est « à trancher »
+- Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
+- Ne corrige QUE les fichiers cochés, puis relit le fichier pour vérifier l'écriture
+- Journalise chaque correction dans <DATA_DIR>/corrections.csv
+- Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
+"""
+__version__ = "1.1.0"
+
+import calendar
+import csv
+import datetime as dt
+import hashlib
+import io
+import json
+import os
+import re
+import subprocess
+import threading
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import requests
+from flask import Flask, Response, abort, redirect, render_template_string, request, send_file, url_for
+from PIL import Image, ImageOps
+
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except Exception:
+    pass
+
+# --------------------------------------------------------------------------- configuration
+LOCAL_ROOT = Path(os.environ.get("LOCAL_ROOT", "/photos"))
+SCAN_DIR = LOCAL_ROOT / os.environ.get("SCAN_SUBDIR", "Pellicule")
+IMMICH_URL = os.environ.get("IMMICH_URL", "").rstrip("/")
+IMMICH_API_KEY = os.environ.get("IMMICH_API_KEY", "")
+IMMICH_ROOT = os.environ.get("IMMICH_ROOT", "").rstrip("/")  # dossier Photos tel que vu par Immich
+TOLERANCE_DAYS = int(os.environ.get("TOLERANCE_DAYS", "1"))
+TZ = ZoneInfo(os.environ.get("TZ", "Europe/Paris"))
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+PORT = int(os.environ.get("PORT", "8099"))
+
+THUMBS = DATA_DIR / "thumbs"
+RESULTS_FILE = DATA_DIR / "results.json"
+LOG_FILE = DATA_DIR / "corrections.csv"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+THUMBS.mkdir(parents=True, exist_ok=True)
+
+PHOTO_EXT = {"jpg", "jpeg", "heic", "heif", "png", "webp", "gif", "tif", "tiff"}
+VIDEO_EXT = {"mov", "mp4", "m4v", "3gp", "avi", "mkv", "mts", "m2ts"}
+RAW_EXT = {"dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "pef", "srw"}
+ALL_EXT = PHOTO_EXT | VIDEO_EXT | RAW_EXT
+
+READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateDate", "-FileModifyDate"]
+DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateDate"]
+FMT = "%Y-%m-%d %H:%M:%S"
+
+app = Flask(__name__)
+LOCK = threading.Lock()
+STATE = {
+    "running": False,
+    "progress": "",
+    "done": 0,
+    "total": 0,
+    "items": [],
+    "stats": {},
+    "error": None,
+    "immich": "",
+    "scanned_at": None,
+}
+ITEMS = {}
+
+
+# --------------------------------------------------------------------------- utilitaires
+def iid(path: str) -> str:
+    return hashlib.sha1(path.encode("utf-8")).hexdigest()[:14]
+
+
+def kind_of(ext: str) -> str:
+    ext = ext.lower()
+    if ext in VIDEO_EXT:
+        return "vidéo"
+    if ext in RAW_EXT:
+        return "raw"
+    return "photo"
+
+
+def tz_offset(d: dt.datetime) -> str:
+    off = TZ.utcoffset(d.replace(tzinfo=None)) or dt.timedelta(0)
+    minutes = int(off.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    minutes = abs(minutes)
+    return f"{sign}{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def parse_date(value):
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        d = dt.datetime.strptime(value[:19], FMT)
+    except ValueError:
+        return None
+    if d.year < 1900:
+        return None
+    return d
+
+
+def immich_headers():
+    return {"x-api-key": IMMICH_API_KEY, "Accept": "application/json"}
+
+
+def immich_enabled() -> bool:
+    return bool(IMMICH_URL and IMMICH_API_KEY and IMMICH_ROOT)
+
+
+def to_immich_path(local_path: Path) -> str:
+    return f"{IMMICH_ROOT}/{local_path.relative_to(LOCAL_ROOT).as_posix()}"
+
+
+# --------------------------------------------------------------------------- référence de date du dossier
+RE_DAY = re.compile(r"^(\d{4})[-_.](\d{2})[-_.](\d{2})(?!\d)")
+RE_MONTH = re.compile(r"^(\d{4})[-_.](\d{2})(?!\d)")
+RE_YEAR = re.compile(r"^(\d{4})(?!\d)")
+RANK = {"an": 1, "mois": 2, "jour": 3}
+
+
+def valid_ref(ref) -> bool:
+    p, y, m, d = ref
+    if not 1900 <= y <= 2100:
+        return False
+    if p in ("mois", "jour") and not 1 <= m <= 12:
+        return False
+    if p == "jour":
+        try:
+            dt.date(y, m, d)
+        except ValueError:
+            return False
+    return True
+
+
+def folder_ref(parts):
+    """Retourne la référence la plus précise trouvée dans les noms de dossiers."""
+    ref = None
+    for part in parts:
+        cand = None
+        m = RE_DAY.match(part)
+        if m:
+            cand = ("jour", int(m[1]), int(m[2]), int(m[3]))
+        else:
+            m = RE_MONTH.match(part)
+            if m:
+                cand = ("mois", int(m[1]), int(m[2]), None)
+            else:
+                m = RE_YEAR.match(part)
+                if m:
+                    cand = ("an", int(m[1]), None, None)
+        if cand and valid_ref(cand) and (ref is None or RANK[cand[0]] >= RANK[ref[0]]):
+            ref = cand
+    return ref
+
+
+def ref_label(ref) -> str:
+    p, y, m, d = ref
+    if p == "jour":
+        return f"{d:02d}/{m:02d}/{y}"
+    if p == "mois":
+        return f"{m:02d}/{y}"
+    return str(y)
+
+
+def ref_bounds(ref):
+    p, y, m, d = ref
+    if p == "jour":
+        s = e = dt.date(y, m, d)
+    elif p == "mois":
+        s, e = dt.date(y, m, 1), dt.date(y, m, calendar.monthrange(y, m)[1])
+    else:
+        s, e = dt.date(y, 1, 1), dt.date(y, 12, 31)
+    return s, e
+
+
+def gap_days(ref, d: dt.datetime) -> int:
+    s, e = ref_bounds(ref)
+    x = d.date()
+    if x < s:
+        return (s - x).days
+    if x > e:
+        return (x - e).days
+    return 0
+
+
+def propose(ref, d):
+    """Date du dossier + heure d'origine (12:00 si aucune date)."""
+    p, y, m, day = ref
+    t = d.time().replace(microsecond=0) if d else dt.time(12, 0, 0)
+    if p == "jour":
+        nd = dt.date(y, m, day)
+    elif p == "mois":
+        last = calendar.monthrange(y, m)[1]
+        nd = dt.date(y, m, min(d.day, last) if d else 1)
+    else:
+        if d:
+            try:
+                nd = dt.date(y, d.month, d.day)
+            except ValueError:
+                nd = dt.date(y, d.month, 28)
+        else:
+            nd = dt.date(y, 1, 1)
+    return dt.datetime.combine(nd, t)
+
+
+# --------------------------------------------------------------------------- date du nom de fichier
+RE_NAME_DT = re.compile(
+    r"(?<!\d)((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])"
+    r"[-_ T.]?([01]\d|2[0-3])[-_.:h]?([0-5]\d)[-_.:m]?([0-5]\d)")
+RE_NAME_D = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)")
+
+
+def name_date(name: str):
+    """Date (et heure si présente) contenue dans le nom du fichier, sinon (None, False)."""
+    stem = Path(name).stem
+    m = RE_NAME_DT.search(stem)
+    if m:
+        try:
+            return dt.datetime(*map(int, m.groups())), True
+        except ValueError:
+            pass
+    m = RE_NAME_D.search(stem)
+    if m:
+        try:
+            return dt.datetime(*map(int, m.groups()), 12, 0, 0), False
+        except ValueError:
+            pass
+    return None, False
+
+
+def propose_from_name(nd: dt.datetime, has_time: bool, d):
+    """Jour du nom de fichier ; heure du nom si présente, sinon heure EXIF, sinon 12:00."""
+    if has_time:
+        return nd
+    t = d.time().replace(microsecond=0) if d else dt.time(12, 0, 0)
+    return dt.datetime.combine(nd.date(), t)
+
+
+# --------------------------------------------------------------------------- exiftool
+def run_exiftool(target: Path, recursive: bool):
+    cmd = ["exiftool", "-j", "-q", "-q", "-fast2", "-api", "QuickTimeUTC", "-d", FMT,
+           "-i", "@eaDir", "-i", "#recycle", "-i", "#snapshot", *READ_TAGS]
+    for e in sorted(ALL_EXT):
+        cmd += ["-ext", e]
+    if recursive:
+        cmd.append("-r")
+    cmd.append(str(target))
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    out = p.stdout.strip()
+    if not out:
+        return []
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return []
+
+
+def pick_date(rec):
+    for tag in DATE_PRIORITY:
+        d = parse_date(rec.get(tag))
+        if d:
+            return d, tag
+    return None, None
+
+
+# --------------------------------------------------------------------------- index Immich
+def immich_index():
+    if not immich_enabled():
+        return {}, "API Immich non configurée : miniatures locales, pas de date Immich."
+    idx, page = {}, 1
+    try:
+        while page:
+            r = requests.post(f"{IMMICH_URL}/api/search/metadata", headers=immich_headers(),
+                              json={"page": page, "size": 1000}, timeout=120)
+            r.raise_for_status()
+            assets = r.json().get("assets", {})
+            for it in assets.get("items", []):
+                op = it.get("originalPath", "")
+                if op.startswith(IMMICH_ROOT + "/"):
+                    idx[op] = (it.get("id"), it.get("localDateTime"))
+            nxt = assets.get("nextPage")
+            page = int(nxt) if nxt else None
+            with LOCK:
+                STATE["progress"] = f"Lecture de l'index Immich… {len(idx)} fichiers trouvés"
+        return idx, f"Immich : {len(idx)} fichiers de la photothèque indexés."
+    except Exception as exc:
+        return idx, f"Immich injoignable ou API refusée ({exc}). Analyse faite sur les fichiers seuls."
+
+
+# --------------------------------------------------------------------------- analyse
+def analyse_record(rec, immich_idx, stats):
+    path = Path(rec["SourceFile"])
+    try:
+        rel = path.relative_to(SCAN_DIR)
+    except ValueError:
+        return None
+    stats["fichiers"] += 1
+    ref = folder_ref(rel.parts[:-1])
+    d, src = pick_date(rec)
+    nd, nd_time = name_date(path.name)
+    name_ref = ("jour", nd.year, nd.month, nd.day) if nd else None
+
+    # 1. Le nom du fichier contredit le dossier : toujours à trancher
+    if nd and ref and gap_days(ref, nd) > TOLERANCE_DAYS:
+        status, key, proposed = "à trancher", "a_trancher", None
+    else:
+        # 2. Référence de détection : le dossier, sinon la date du nom du fichier
+        det_ref = ref or name_ref
+        if det_ref is None:
+            stats["sans_ref"] += 1
+            if d:
+                return None
+        if d and det_ref and gap_days(det_ref, d) <= TOLERANCE_DAYS:
+            stats["ok"] += 1
+            return None
+        status, key = ("sans date", "sans_date") if d is None else ("écart", "ecart")
+        if nd:
+            proposed = propose_from_name(nd, nd_time, d)
+        elif ref:
+            proposed = propose(ref, d)
+        else:
+            proposed = dt.datetime.combine(dt.date.today(), dt.time(12, 0))
+    stats[key] += 1
+
+    immich_id, immich_date = None, None
+    if immich_idx:
+        hit = immich_idx.get(to_immich_path(path))
+        if hit:
+            immich_id, immich_date = hit
+    gap_ref = ref or name_ref
+    folder_choice = propose(ref, d) if ref else None
+    name_choice = propose_from_name(nd, nd_time, d) if nd else None
+    fmt_in = "%Y-%m-%dT%H:%M:%S"
+    return {
+        "id": iid(str(path)),
+        "path": str(path),
+        "name": path.name,
+        "folder": str(rel.parent),
+        "kind": kind_of(path.suffix.lstrip(".")),
+        "status": status,
+        "ref": ref_label(ref) if ref else "aucune",
+        "date": d.strftime("%d/%m/%Y %H:%M:%S") if d else "",
+        "source": src or "",
+        "gap": gap_days(gap_ref, d) if (d and gap_ref) else None,
+        "name_date": (nd.strftime("%d/%m/%Y %H:%M:%S") if nd_time else nd.strftime("%d/%m/%Y")) if nd else "",
+        "choice_folder": folder_choice.strftime(fmt_in) if folder_choice else "",
+        "choice_name": name_choice.strftime(fmt_in) if name_choice else "",
+        "immich_id": immich_id,
+        "immich_date": (immich_date or "")[:16].replace("T", " "),
+        "has_creationdate": "CreationDate" in rec,
+        "proposed": proposed.strftime(fmt_in) if proposed else "",
+        "result": None,
+    }
+
+
+def scan_worker():
+    try:
+        stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "sans_ref": 0}
+        immich_idx, immich_msg = immich_index()
+        targets = [(SCAN_DIR, False)] + [
+            (p, True) for p in sorted(SCAN_DIR.iterdir())
+            if p.is_dir() and not p.name.startswith(("@", "#", "."))
+        ]
+        with LOCK:
+            STATE.update(total=len(targets), done=0, immich=immich_msg)
+        items = []
+        for n, (target, rec_flag) in enumerate(targets, 1):
+            with LOCK:
+                STATE["progress"] = f"Analyse de {target.relative_to(LOCAL_ROOT)}…"
+            for rec in run_exiftool(target, rec_flag):
+                item = analyse_record(rec, immich_idx, stats)
+                if item:
+                    items.append(item)
+            with LOCK:
+                STATE["done"] = n
+        items.sort(key=lambda i: (i["folder"], i["name"]))
+        with LOCK:
+            STATE.update(items=items, stats=stats, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                         progress="Terminé", error=None)
+            ITEMS.clear()
+            ITEMS.update({i["id"]: i for i in items})
+        save_results()
+    except Exception as exc:
+        with LOCK:
+            STATE["error"] = str(exc)
+    finally:
+        with LOCK:
+            STATE["running"] = False
+
+
+def save_results():
+    with LOCK:
+        data = {k: STATE[k] for k in ("items", "stats", "immich", "scanned_at")}
+    RESULTS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_results():
+    if RESULTS_FILE.exists():
+        try:
+            data = json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
+            STATE.update(data)
+            ITEMS.update({i["id"]: i for i in STATE["items"]})
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- correction
+def write_date(item, nd: dt.datetime):
+    path = Path(item["path"])
+    v = nd.strftime("%Y:%m:%d %H:%M:%S")
+    off = tz_offset(nd)
+    ext = path.suffix.lstrip(".").lower()
+    args = ["exiftool", "-overwrite_original", "-q", "-m"]
+    if ext in VIDEO_EXT:
+        args += ["-api", "QuickTimeUTC"]
+        for tag in ("CreateDate", "ModifyDate", "TrackCreateDate", "TrackModifyDate",
+                    "MediaCreateDate", "MediaModifyDate"):
+            args.append(f"-QuickTime:{tag}={v}")
+        if item.get("has_creationdate"):
+            args.append(f"-Keys:CreationDate={v}{off}")
+    else:
+        args += [f"-AllDates={v}", f"-OffsetTimeOriginal={off}", f"-OffsetTimeDigitized={off}",
+                 f"-OffsetTime={off}"]
+    args += [f"-FileModifyDate={v}{off}", str(path)]
+    p = subprocess.run(args, capture_output=True, text=True)
+    if p.returncode != 0:
+        return False, (p.stderr or p.stdout).strip()[:300]
+
+    # sidecars XMP : Immich les lit en priorité
+    for sc in (Path(str(path) + ".xmp"), path.with_suffix(".xmp")):
+        if sc.exists():
+            subprocess.run(["exiftool", "-overwrite_original", "-q", "-m",
+                            f"-XMP-exif:DateTimeOriginal={v}{off}", f"-XMP-xmp:CreateDate={v}{off}",
+                            str(sc)], capture_output=True, text=True)
+    return True, ""
+
+
+def verify(item, nd: dt.datetime):
+    """Relit le fichier après écriture et compare à la date demandée."""
+    recs = run_exiftool(Path(item["path"]), False)
+    if not recs:
+        return False, "relecture impossible"
+    d, src = pick_date(recs[0])
+    if d is None:
+        return False, "aucune date relue"
+    if abs((d - nd).total_seconds()) > 60:
+        return False, f"relu {d.strftime('%d/%m/%Y %H:%M:%S')} ({src})"
+    return True, f"relu {d.strftime('%d/%m/%Y %H:%M:%S')} ({src})"
+
+
+def log_correction(item, nd, ok, msg):
+    new = not LOG_FILE.exists()
+    with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, delimiter=";")
+        if new:
+            w.writerow(["horodatage", "fichier", "ancienne_date", "source", "nouvelle_date", "statut", "detail"])
+        w.writerow([dt.datetime.now().isoformat(timespec="seconds"), item["path"], item["date"],
+                    item["source"], nd.strftime("%d/%m/%Y %H:%M:%S"), "ok" if ok else "échec", msg])
+
+
+def immich_refresh(asset_ids):
+    if not (immich_enabled() and asset_ids):
+        return ""
+    try:
+        r = requests.post(f"{IMMICH_URL}/api/assets/jobs", headers=immich_headers(),
+                          json={"assetIds": asset_ids, "name": "refresh-metadata"}, timeout=60)
+        r.raise_for_status()
+        return f"Immich : relecture des métadonnées demandée pour {len(asset_ids)} fichier(s)."
+    except Exception as exc:
+        return f"Immich : relecture non demandée ({exc}). Lance un scan de la bibliothèque externe."
+
+
+# --------------------------------------------------------------------------- miniatures
+PLACEHOLDER = ('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="220">'
+               '<rect width="100%" height="100%" fill="#ddd"/><text x="50%" y="50%" fill="#777" '
+               'font-family="sans-serif" font-size="16" text-anchor="middle">aperçu indisponible</text></svg>')
+
+
+def save_thumb(img: Image.Image, cache: Path):
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    img.thumbnail((320, 320))
+    img.save(cache, "JPEG", quality=80)
+
+
+def make_thumb(item, cache: Path):
+    path = Path(item["path"])
+    ext = path.suffix.lstrip(".").lower()
+    if item.get("immich_id") and immich_enabled():
+        try:
+            r = requests.get(f"{IMMICH_URL}/api/assets/{item['immich_id']}/thumbnail",
+                             headers=immich_headers(), params={"size": "thumbnail"}, timeout=30)
+            r.raise_for_status()
+            save_thumb(Image.open(io.BytesIO(r.content)), cache)
+            return
+        except Exception:
+            pass
+    try:
+        if ext in VIDEO_EXT:
+            for ss in ("1", "0"):
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", ss, "-i", str(path),
+                                "-frames:v", "1", "-vf", "scale=320:-2", str(cache)],
+                               capture_output=True, timeout=60)
+                if cache.exists() and cache.stat().st_size > 0:
+                    return
+        elif ext in RAW_EXT:
+            for tag in ("-PreviewImage", "-JpgFromRaw", "-ThumbnailImage"):
+                p = subprocess.run(["exiftool", "-b", tag, str(path)], capture_output=True, timeout=60)
+                if p.stdout:
+                    save_thumb(Image.open(io.BytesIO(p.stdout)), cache)
+                    return
+        else:
+            save_thumb(Image.open(path), cache)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- pages
+PAGE = """<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vérif dates Pellicule</title>
+{% if state.running %}<meta http-equiv="refresh" content="3">{% endif %}
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--warn:#c2410c;--bad:#b91c1c;--ok:#15803d;--acc:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+h1{font-size:18px;margin:0 12px 0 0}main{padding:16px;max-width:1400px;margin:auto}
+button,.btn{border:0;border-radius:8px;padding:8px 14px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;text-decoration:none}
+button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.stats{color:var(--mute);font-size:13px}.msg{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:14px}
+.folder{margin:22px 0 8px;display:flex;gap:10px;align-items:center}.folder h2{font-size:15px;margin:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+.card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
+.name{font-weight:600;word-break:break-all}.tag{display:inline-block;border-radius:5px;padding:1px 6px;font-size:12px;font-weight:600;color:#fff}
+.t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-trancher{background:#7c3aed}.mute{color:var(--mute)}
+.choix{display:flex;gap:6px;flex-wrap:wrap}.choix button{padding:4px 8px;font-size:12px}
+input[type=datetime-local]{width:100%;padding:5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px}
+.res-ok{color:var(--ok);font-weight:600}.res-ko{color:var(--bad);font-weight:600}
+select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+</style></head><body>
+<header>
+  <h1>Vérification des dates — Pellicule <span class="mute" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
+  <form method="post" action="{{ url_for('scan') }}"><button {% if state.running %}disabled{% endif %}>
+    {% if state.running %}Analyse en cours…{% else %}Lancer l'analyse{% endif %}</button></form>
+  {% if items %}
+  <select id="filtre" onchange="filtrer()">
+    <option value="tous">Tout afficher</option><option value="écart">Écarts de date</option>
+    <option value="sans date">Sans date EXIF</option><option value="à trancher">À trancher (nom ≠ dossier)</option>
+    <option value="restant">Non corrigés</option>
+  </select>
+  <button class="sec" type="button" onclick="cocher(true)">Tout cocher (visible)</button>
+  <button class="sec" type="button" onclick="cocher(false)">Tout décocher</button>
+  <button form="f" onclick="return confirmer()">Corriger la sélection</button>
+  {% endif %}
+  <span class="stats">
+  {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
+  {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·
+  {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}</span>
+</header>
+<main>
+{% if state.running %}<div class="msg">{{ state.progress }} ({{ state.done }}/{{ state.total }} dossiers)</div>{% endif %}
+{% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
+{% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
+{% for m in messages %}<div class="msg">{{ m }}</div>{% endfor %}
+{% if not items and state.scanned_at and not state.running %}<div class="msg res-ok">Aucun écart trouvé.</div>{% endif %}
+<form id="f" method="post" action="{{ url_for('apply') }}">
+{% for folder, group in groups %}
+  <div class="folder" data-folder><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }}</span>
+  <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button></div>
+  <div class="grid">
+  {% for it in group %}
+    <div class="card" data-status="{{ it.status }}" data-done="{{ 1 if it.result and it.result.ok else 0 }}">
+      <img loading="lazy" src="{{ url_for('thumb', item_id=it.id) }}" alt="">
+      <div class="body">
+        <div class="name">{{ it.name }}</div>
+        <div><span class="tag {{ 't-sans' if it.status == 'sans date' else ('t-trancher' if it.status == 'à trancher' else 't-ecart') }}">{{ it.status }}</span>
+          <span class="mute">{{ it.kind }}{% if it.gap %} · {{ it.gap }} j d'écart{% endif %}</span></div>
+        <div>Fichier : {{ it.date or '—' }} {% if it.source %}<span class="mute">({{ it.source }})</span>{% endif %}</div>
+        {% if it.name_date %}<div>Nom du fichier : {{ it.name_date }}</div>{% endif %}
+        {% if it.immich_date %}<div class="mute">Immich : {{ it.immich_date }}</div>{% endif %}
+        {% if it.result %}
+          <div class="{{ 'res-ok' if it.result.ok else 'res-ko' }}">{{ '✓ corrigé' if it.result.ok else '✗ échec' }} — {{ it.result.msg }}</div>
+        {% else %}
+          {% if it.status == 'à trancher' %}
+          <div class="mute">Choisis la date à écrire :</div>
+          <div class="choix">
+            {% if it.choice_folder %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_folder }}')">Dossier ({{ it.ref }})</button>{% endif %}
+            {% if it.choice_name %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_name }}')">Nom ({{ it.name_date[:10] }})</button>{% endif %}
+          </div>
+          {% else %}
+          <div class="mute">Date proposée :</div>
+          {% endif %}
+          <input type="datetime-local" step="1" name="date_{{ it.id }}" value="{{ it.proposed }}">
+          <label class="sel"><input type="checkbox" name="sel" value="{{ it.id }}"> Corriger</label>
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+{% endfor %}
+</form>
+</main>
+<script>
+function visibles(){return [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none')}
+function cocher(v){visibles().forEach(c=>{const b=c.querySelector('input[type=checkbox]');if(b)b.checked=v})}
+function cocherDossier(btn){let g=btn.parentElement.nextElementSibling;g.querySelectorAll('.card').forEach(c=>{
+  if(c.style.display==='none')return;const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true})}
+function filtrer(){const f=document.getElementById('filtre').value;document.querySelectorAll('.card').forEach(c=>{
+  let show=f==='tous'||(f==='restant'?c.dataset.done==='0':c.dataset.status===f);c.style.display=show?'':'none'});
+  document.querySelectorAll('[data-folder]').forEach(h=>{const g=h.nextElementSibling;
+  const any=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');h.style.display=g.style.display=any?'':'none'})}
+function choisir(btn,v){const c=btn.closest('.body');c.querySelector('input[type=datetime-local]').value=v;
+  const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true}
+function confirmer(){
+  const vides=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
+  if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked').length;
+  if(!n){alert('Aucun fichier coché.');return false}
+  return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original). Continuer ?')}
+</script>
+</body></html>"""
+
+
+@app.get("/")
+def index():
+    with LOCK:
+        items = list(STATE["items"])
+        state = dict(STATE)
+    groups = {}
+    for it in items:
+        groups.setdefault(it["folder"], []).append(it)
+    messages = request.args.getlist("m")
+    return render_template_string(PAGE, state=state, items=items, groups=list(groups.items()),
+                                  tol=TOLERANCE_DAYS, messages=messages, version=__version__)
+
+
+@app.post("/scan")
+def scan():
+    with LOCK:
+        if STATE["running"]:
+            return redirect(url_for("index"))
+        STATE.update(running=True, error=None, progress="Démarrage…", done=0, total=0)
+    for f in THUMBS.glob("*.jpg"):
+        f.unlink(missing_ok=True)
+    threading.Thread(target=scan_worker, daemon=True).start()
+    return redirect(url_for("index"))
+
+
+@app.post("/apply")
+def apply():
+    ids = request.form.getlist("sel")
+    ok_count, ko_count, refresh = 0, 0, []
+    for item_id in ids:
+        item = ITEMS.get(item_id)
+        if not item or (item.get("result") or {}).get("ok"):
+            continue
+        raw = request.form.get(f"date_{item_id}", "")
+        nd = None
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+            try:
+                nd = dt.datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                pass
+        if nd is None:
+            item["result"] = {"ok": False, "msg": "date saisie invalide"}
+            ko_count += 1
+            continue
+        ok, msg = write_date(item, nd)
+        if ok:
+            ok, msg = verify(item, nd)
+        log_correction(item, nd, ok, msg)
+        item["result"] = {"ok": ok, "msg": msg}
+        THUMBS.joinpath(f"{item_id}.jpg").unlink(missing_ok=True)
+        if ok:
+            ok_count += 1
+            if item.get("immich_id"):
+                refresh.append(item["immich_id"])
+        else:
+            ko_count += 1
+    save_results()
+    msgs = [f"{ok_count} fichier(s) corrigé(s) et vérifié(s), {ko_count} échec(s). Journal : {LOG_FILE}"]
+    r = immich_refresh(refresh)
+    if r:
+        msgs.append(r)
+    return redirect(url_for("index", m=msgs))
+
+
+@app.get("/thumb/<item_id>")
+def thumb(item_id):
+    item = ITEMS.get(item_id) or abort(404)
+    cache = THUMBS / f"{item_id}.jpg"
+    if not cache.exists():
+        make_thumb(item, cache)
+    if cache.exists() and cache.stat().st_size > 0:
+        return send_file(cache, mimetype="image/jpeg", max_age=0)
+    return Response(PLACEHOLDER, mimetype="image/svg+xml")
+
+
+@app.get("/journal.csv")
+def journal():
+    if not LOG_FILE.exists():
+        abort(404)
+    return send_file(LOG_FILE, mimetype="text/csv", as_attachment=True, download_name="corrections.csv")
+
+
+if __name__ == "__main__":
+    load_results()
+    if not SCAN_DIR.is_dir():
+        print(f"ATTENTION : dossier introuvable {SCAN_DIR}")
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
