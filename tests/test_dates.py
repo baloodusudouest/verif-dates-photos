@@ -75,5 +75,32 @@ def test_analyse_et_correction(app):
     assert client.get("/").status_code == 200
     it = items["2008-08-10-014136052.jpg"]
     client.post("/apply", data={"sel": it["id"], f"date_{it['id']}": it["proposed"]})
+    app.APPLY_THREAD.join(timeout=60)
     assert it["result"]["ok"], it["result"]
+    assert "1 fichier(s) corrigé(s)" in app.STATE["messages"][0]
+    assert client.get("/progress").get_json()["running"] is False
     assert not list(burger.glob("*_original"))
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_progression(app):
+    dossier = app.SCAN_DIR / "2019" / "2019-07-14 Mariage"
+    dossier.mkdir(parents=True)
+    (app.SCAN_DIR / "2019" / "@eaDir").mkdir()
+    img = Image.new("RGB", (8, 8), "red")
+    for n in range(250):
+        img.save(dossier / f"p{n:03d}.jpg")
+    img.save(app.SCAN_DIR / "2019" / "@eaDir" / "vignette.jpg")
+    vus = []
+    origine = app.set_progress
+
+    def espion(**kw):
+        origine(**kw)
+        if "done" in kw and app.STATE["total"]:
+            vus.append((app.STATE["done"], app.STATE["total"]))
+
+    app.set_progress = espion
+    app.scan_worker()
+    assert app.STATE["stats"]["fichiers"] == 250          # @eaDir ignoré
+    assert vus[-1] == (250, 250)
+    assert len([v for v in vus if v[0] > 0]) == 3          # 3 lots de 100 max : la barre avance

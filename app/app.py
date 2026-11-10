@@ -6,12 +6,13 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Compare la date de prise de vue à la date du dossier (AAAA-MM-JJ, sinon AAAA-MM, sinon AAAA)
 - Lit aussi la date contenue dans le nom du fichier (IMG_20190714_153000, 2008-08-10-014136052…) :
   elle devient la date proposée si elle concorde avec le dossier, sinon la photo est « à trancher »
+- Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
 - Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
 - Ne corrige QUE les fichiers cochés, puis relit le fichier pour vérifier l'écriture
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import calendar
 import csv
@@ -75,6 +76,10 @@ STATE = {
     "error": None,
     "immich": "",
     "scanned_at": None,
+    "phase": "",        # étape en cours (affichée au-dessus de la barre)
+    "kind": "",         # "analyse" ou "correction"
+    "started": None,    # horodatage de début, pour le temps restant
+    "messages": [],     # messages à afficher à la fin d'une correction
 }
 ITEMS = {}
 
@@ -269,6 +274,44 @@ def run_exiftool(target: Path, recursive: bool):
         return []
 
 
+SKIP_DIRS = {"@eaDir", "#recycle", "#snapshot"}
+CHUNK = 100   # fichiers par appel exiftool : assez gros pour être rapide, assez petit pour la barre
+
+
+def list_files():
+    """Recense les fichiers à analyser (ignore les dossiers techniques Synology)."""
+    files = []
+    for root, dirs, names in os.walk(SCAN_DIR):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        for n in sorted(names):
+            if not n.startswith(".") and Path(n).suffix.lstrip(".").lower() in ALL_EXT:
+                files.append(Path(root) / n)
+    return files
+
+
+def run_exiftool_files(paths):
+    """Lit les dates d'une liste de fichiers en un seul appel exiftool (liste passée par fichier -@)."""
+    if not paths:
+        return []
+    argfile = DATA_DIR / "exiftool-args.txt"
+    argfile.write_text("\n".join(str(x) for x in paths) + "\n", encoding="utf-8")
+    cmd = ["exiftool", "-j", "-q", "-q", "-fast2", "-api", "QuickTimeUTC", "-d", FMT,
+           "-charset", "filename=utf8", *READ_TAGS, "-@", str(argfile)]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    out = p.stdout.strip()
+    if not out:
+        return []
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return []
+
+
+def set_progress(**kw):
+    with LOCK:
+        STATE.update(**kw)
+
+
 def pick_date(rec):
     for tag in DATE_PRIORITY:
         d = parse_date(rec.get(tag))
@@ -294,8 +337,7 @@ def immich_index():
                     idx[op] = (it.get("id"), it.get("localDateTime"))
             nxt = assets.get("nextPage")
             page = int(nxt) if nxt else None
-            with LOCK:
-                STATE["progress"] = f"Lecture de l'index Immich… {len(idx)} fichiers trouvés"
+            set_progress(progress=f"{len(idx)} fichiers de la photothèque trouvés (page {page or 'fin'})")
         return idx, f"Immich : {len(idx)} fichiers de la photothèque indexés."
     except Exception as exc:
         return idx, f"Immich injoignable ou API refusée ({exc}). Analyse faite sur les fichiers seuls."
@@ -370,36 +412,34 @@ def analyse_record(rec, immich_idx, stats):
 def scan_worker():
     try:
         stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "sans_ref": 0}
+        set_progress(phase="1/3 · Lecture de l'index Immich", progress="", done=0, total=0)
         immich_idx, immich_msg = immich_index()
-        targets = [(SCAN_DIR, False)] + [
-            (p, True) for p in sorted(SCAN_DIR.iterdir())
-            if p.is_dir() and not p.name.startswith(("@", "#", "."))
-        ]
-        with LOCK:
-            STATE.update(total=len(targets), done=0, immich=immich_msg)
+
+        set_progress(phase="2/3 · Recensement des fichiers", progress="", immich=immich_msg)
+        files = list_files()
+
+        set_progress(phase="3/3 · Analyse des dates", total=len(files), done=0,
+                     started=dt.datetime.now().timestamp())
         items = []
-        for n, (target, rec_flag) in enumerate(targets, 1):
-            with LOCK:
-                STATE["progress"] = f"Analyse de {target.relative_to(LOCAL_ROOT)}…"
-            for rec in run_exiftool(target, rec_flag):
+        for i in range(0, len(files), CHUNK):
+            chunk = files[i:i + CHUNK]
+            set_progress(progress=str(chunk[0].parent.relative_to(LOCAL_ROOT)))
+            for rec in run_exiftool_files(chunk):
                 item = analyse_record(rec, immich_idx, stats)
                 if item:
                     items.append(item)
-            with LOCK:
-                STATE["done"] = n
-        items.sort(key=lambda i: (i["folder"], i["name"]))
+            set_progress(done=i + len(chunk))
+        items.sort(key=lambda it: (it["folder"], it["name"]))
         with LOCK:
             STATE.update(items=items, stats=stats, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
                          progress="Terminé", error=None)
             ITEMS.clear()
-            ITEMS.update({i["id"]: i for i in items})
+            ITEMS.update({it["id"]: it for it in items})
         save_results()
     except Exception as exc:
-        with LOCK:
-            STATE["error"] = str(exc)
+        set_progress(error=str(exc))
     finally:
-        with LOCK:
-            STATE["running"] = False
+        set_progress(running=False, kind="", phase="")
 
 
 def save_results():
@@ -532,7 +572,6 @@ def make_thumb(item, cache: Path):
 PAGE = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Vérif dates Pellicule</title>
-{% if state.running %}<meta http-equiv="refresh" content="3">{% endif %}
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--warn:#c2410c;--bad:#b91c1c;--ok:#15803d;--acc:#2563eb}
 @media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
@@ -552,12 +591,18 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 input[type=datetime-local]{width:100%;padding:5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px}
 .res-ok{color:var(--ok);font-weight:600}.res-ko{color:var(--bad);font-weight:600}
+.prog{display:flex;flex-direction:column;gap:8px}.prog-head,.prog-foot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.prog-foot span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.bar{height:12px;border-radius:6px;background:var(--line);overflow:hidden;position:relative}
+.fill{height:100%;width:0;background:var(--acc);border-radius:6px;transition:width .4s ease}
+.bar.indet .fill{width:30%;position:absolute;animation:indet 1.2s ease-in-out infinite}
+@keyframes indet{0%{left:-30%}100%{left:100%}}
 select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 </style></head><body>
 <header>
   <h1>Vérification des dates — Pellicule <span class="mute" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
   <form method="post" action="{{ url_for('scan') }}"><button {% if state.running %}disabled{% endif %}>
-    {% if state.running %}Analyse en cours…{% else %}Lancer l'analyse{% endif %}</button></form>
+    {% if state.running %}{{ 'Correction en cours…' if state.kind == 'correction' else 'Analyse en cours…' }}{% else %}Lancer l'analyse{% endif %}</button></form>
   {% if items %}
   <select id="filtre" onchange="filtrer()">
     <option value="tous">Tout afficher</option><option value="écart">Écarts de date</option>
@@ -566,7 +611,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   </select>
   <button class="sec" type="button" onclick="cocher(true)">Tout cocher (visible)</button>
   <button class="sec" type="button" onclick="cocher(false)">Tout décocher</button>
-  <button form="f" onclick="return confirmer()">Corriger la sélection</button>
+  <button form="f" onclick="return confirmer()" {% if state.running %}disabled{% endif %}>Corriger la sélection</button>
   {% endif %}
   <span class="stats">
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
@@ -574,7 +619,11 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}</span>
 </header>
 <main>
-{% if state.running %}<div class="msg">{{ state.progress }} ({{ state.done }}/{{ state.total }} dossiers)</div>{% endif %}
+<div id="prog" class="msg prog" {% if not state.running %}hidden{% endif %}>
+  <div class="prog-head"><strong id="prog-phase">{{ state.phase }}</strong><span id="prog-count" class="mute"></span></div>
+  <div class="bar"><div id="prog-fill" class="fill"></div></div>
+  <div class="prog-foot"><span id="prog-detail" class="mute"></span><span id="prog-eta" class="mute"></span></div>
+</div>
 {% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
 {% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
 {% for m in messages %}<div class="msg">{{ m }}</div>{% endfor %}
@@ -627,6 +676,25 @@ function filtrer(){const f=document.getElementById('filtre').value;document.quer
   const any=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');h.style.display=g.style.display=any?'':'none'})}
 function choisir(btn,v){const c=btn.closest('.body');c.querySelector('input[type=datetime-local]').value=v;
   const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true}
+function duree(s){if(s==null)return'';if(s<60)return'≈ '+s+' s restantes';
+  const m=Math.round(s/60);return m<60?'≈ '+m+' min restantes':'≈ '+Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' restantes'}
+let wasRunning={{ 'true' if state.running else 'false' }};
+async function suivre(){
+  let st;try{st=await (await fetch('{{ url_for('progress') }}',{cache:'no-store'})).json()}catch(e){return setTimeout(suivre,3000)}
+  const box=document.getElementById('prog');
+  if(st.running){
+    wasRunning=true;box.hidden=false;
+    document.getElementById('prog-phase').textContent=st.phase||'…';
+    const bar=box.querySelector('.bar'),fill=document.getElementById('prog-fill');
+    if(st.total>0){bar.classList.remove('indet');const pc=Math.floor(st.done*100/st.total);fill.style.width=pc+'%';
+      document.getElementById('prog-count').textContent=st.done.toLocaleString('fr-FR')+' / '+st.total.toLocaleString('fr-FR')+' · '+pc+' %';}
+    else{bar.classList.add('indet');fill.style.width='';document.getElementById('prog-count').textContent='';}
+    document.getElementById('prog-detail').textContent=st.progress||'';
+    document.getElementById('prog-eta').textContent=duree(st.remaining);
+    setTimeout(suivre,1500);
+  } else if(wasRunning){location.replace('{{ url_for('index') }}')}
+}
+if(wasRunning)suivre();
 function confirmer(){
   const vides=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
   if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked').length;
@@ -644,7 +712,7 @@ def index():
     groups = {}
     for it in items:
         groups.setdefault(it["folder"], []).append(it)
-    messages = request.args.getlist("m")
+    messages = request.args.getlist("m") + list(state.get("messages") or [])
     return render_template_string(PAGE, state=state, items=items, groups=list(groups.items()),
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__)
 
@@ -654,18 +722,59 @@ def scan():
     with LOCK:
         if STATE["running"]:
             return redirect(url_for("index"))
-        STATE.update(running=True, error=None, progress="Démarrage…", done=0, total=0)
+        STATE.update(running=True, kind="analyse", error=None, messages=[], phase="Démarrage…",
+                     progress="", done=0, total=0, started=None)
     for f in THUMBS.glob("*.jpg"):
         f.unlink(missing_ok=True)
     threading.Thread(target=scan_worker, daemon=True).start()
     return redirect(url_for("index"))
 
 
+def apply_worker(jobs):
+    """Corrige les fichiers un par un en mettant la barre de progression à jour."""
+    ok_count, ko_count, refresh = 0, 0, []
+    try:
+        set_progress(phase="Correction des dates", total=len(jobs), done=0,
+                     started=dt.datetime.now().timestamp())
+        for n, (item, nd) in enumerate(jobs, 1):
+            set_progress(progress=item["name"])
+            if nd is None:
+                item["result"] = {"ok": False, "msg": "date saisie invalide"}
+                ko_count += 1
+            else:
+                ok, msg = write_date(item, nd)
+                if ok:
+                    ok, msg = verify(item, nd)
+                log_correction(item, nd, ok, msg)
+                item["result"] = {"ok": ok, "msg": msg}
+                THUMBS.joinpath(f"{item['id']}.jpg").unlink(missing_ok=True)
+                if ok:
+                    ok_count += 1
+                    if item.get("immich_id"):
+                        refresh.append(item["immich_id"])
+                else:
+                    ko_count += 1
+            set_progress(done=n)
+        save_results()
+        msgs = [f"{ok_count} fichier(s) corrigé(s) et vérifié(s), {ko_count} échec(s). Journal : {LOG_FILE}"]
+        r = immich_refresh(refresh)
+        if r:
+            msgs.append(r)
+        set_progress(messages=msgs)
+    except Exception as exc:
+        set_progress(error=str(exc))
+    finally:
+        set_progress(running=False, kind="", phase="")
+
+
+APPLY_THREAD = None
+
+
 @app.post("/apply")
 def apply():
-    ids = request.form.getlist("sel")
-    ok_count, ko_count, refresh = 0, 0, []
-    for item_id in ids:
+    global APPLY_THREAD
+    jobs = []
+    for item_id in request.form.getlist("sel"):
         item = ITEMS.get(item_id)
         if not item or (item.get("result") or {}).get("ok"):
             continue
@@ -677,28 +786,27 @@ def apply():
                 break
             except ValueError:
                 pass
-        if nd is None:
-            item["result"] = {"ok": False, "msg": "date saisie invalide"}
-            ko_count += 1
-            continue
-        ok, msg = write_date(item, nd)
-        if ok:
-            ok, msg = verify(item, nd)
-        log_correction(item, nd, ok, msg)
-        item["result"] = {"ok": ok, "msg": msg}
-        THUMBS.joinpath(f"{item_id}.jpg").unlink(missing_ok=True)
-        if ok:
-            ok_count += 1
-            if item.get("immich_id"):
-                refresh.append(item["immich_id"])
-        else:
-            ko_count += 1
-    save_results()
-    msgs = [f"{ok_count} fichier(s) corrigé(s) et vérifié(s), {ko_count} échec(s). Journal : {LOG_FILE}"]
-    r = immich_refresh(refresh)
-    if r:
-        msgs.append(r)
-    return redirect(url_for("index", m=msgs))
+        jobs.append((item, nd))
+    with LOCK:
+        if STATE["running"] or not jobs:
+            return redirect(url_for("index"))
+        STATE.update(running=True, kind="correction", error=None, messages=[], progress="", done=0,
+                     total=len(jobs))
+    APPLY_THREAD = threading.Thread(target=apply_worker, args=(jobs,), daemon=True)
+    APPLY_THREAD.start()
+    return redirect(url_for("index"))
+
+
+@app.get("/progress")
+def progress():
+    with LOCK:
+        st = {k: STATE[k] for k in ("running", "kind", "phase", "progress", "done", "total", "started", "error")}
+    remaining = None
+    if st["running"] and st["started"] and st["total"] and 0 < st["done"] < st["total"]:
+        elapsed = dt.datetime.now().timestamp() - st["started"]
+        remaining = int(elapsed / st["done"] * (st["total"] - st["done"]))
+    st["remaining"] = remaining
+    return st
 
 
 @app.get("/thumb/<item_id>")
