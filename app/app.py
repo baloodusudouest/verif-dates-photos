@@ -6,13 +6,15 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Compare la date de prise de vue à la date du dossier (AAAA-MM-JJ, sinon AAAA-MM, sinon AAAA)
 - Lit aussi la date contenue dans le nom du fichier (IMG_20190714_153000, 2008-08-10-014136052…) :
   elle devient la date proposée si elle concorde avec le dossier, sinon la photo est « à trancher »
+- Deux modes : « Scanner les nouveaux » (fichiers nouveaux ou modifiés depuis la dernière analyse,
+  les autres sont repris du cache) et « Tout rescanner »
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
 - Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
 - Ne corrige QUE les fichiers cochés, puis relit le fichier pour vérifier l'écriture
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import calendar
 import csv
@@ -52,6 +54,7 @@ PORT = int(os.environ.get("PORT", "8099"))
 THUMBS = DATA_DIR / "thumbs"
 RESULTS_FILE = DATA_DIR / "results.json"
 LOG_FILE = DATA_DIR / "corrections.csv"
+CACHE_FILE = DATA_DIR / "cache.json"   # résultat par fichier (taille + date de modification) pour le mode incrémental
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 THUMBS.mkdir(parents=True, exist_ok=True)
 
@@ -409,7 +412,38 @@ def analyse_record(rec, immich_idx, stats):
     }
 
 
-def scan_worker():
+def cache_params():
+    """Réglages qui changent le résultat : s'ils changent, le cache n'est plus valable."""
+    return {"version": __version__.rsplit(".", 1)[0], "tol": TOLERANCE_DAYS, "root": str(SCAN_DIR),
+            "immich": IMMICH_ROOT}
+
+
+def load_cache():
+    try:
+        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        if data.get("params") == cache_params():
+            return data.get("files", {})
+    except Exception:
+        pass
+    return {}
+
+
+def save_cache(files):
+    tmp = CACHE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"params": cache_params(), "files": files}, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(CACHE_FILE)
+
+
+def file_sig(path: Path):
+    try:
+        st = path.stat()
+        return [st.st_size, st.st_mtime_ns]
+    except OSError:
+        return None
+
+
+def scan_worker(mode="tout"):
+    """mode « tout » : tout relire ; mode « nouveaux » : seuls les fichiers nouveaux ou modifiés."""
     try:
         stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "sans_ref": 0}
         set_progress(phase="1/3 · Lecture de l'index Immich", progress="", done=0, total=0)
@@ -417,24 +451,56 @@ def scan_worker():
 
         set_progress(phase="2/3 · Recensement des fichiers", progress="", immich=immich_msg)
         files = list_files()
+        old_cache = load_cache() if mode == "nouveaux" else {}
+        new_cache, items, to_scan, reused = {}, [], [], 0
+        for f in files:
+            sig = file_sig(f)
+            entry = old_cache.get(str(f))
+            if sig and entry and entry.get("sig") == sig:
+                # fichier inchangé depuis la dernière analyse : résultat repris tel quel
+                reused += 1
+                for k, v in entry["stats"].items():
+                    stats[k] += v
+                item = entry.get("item")
+                if item:
+                    item = dict(item, result=None)
+                    if immich_idx:   # l'index Immich a pu changer : id et date relus
+                        hit = immich_idx.get(to_immich_path(f))
+                        item["immich_id"], item["immich_date"] = (
+                            (hit[0], (hit[1] or "")[:16].replace("T", " ")) if hit else (None, ""))
+                    items.append(item)
+                new_cache[str(f)] = entry
+            else:
+                to_scan.append(f)
 
-        set_progress(phase="3/3 · Analyse des dates", total=len(files), done=0,
-                     started=dt.datetime.now().timestamp())
-        items = []
-        for i in range(0, len(files), CHUNK):
-            chunk = files[i:i + CHUNK]
+        libelle = "3/3 · Analyse des dates"
+        if mode == "nouveaux":
+            libelle += f" — {len(to_scan):,} nouveaux ou modifiés, {reused:,} repris".replace(",", " ")
+        set_progress(phase=libelle, total=len(to_scan), done=0, started=dt.datetime.now().timestamp())
+        for i in range(0, len(to_scan), CHUNK):
+            chunk = to_scan[i:i + CHUNK]
             set_progress(progress=str(chunk[0].parent.relative_to(LOCAL_ROOT)))
             for rec in run_exiftool_files(chunk):
+                before = dict(stats)
                 item = analyse_record(rec, immich_idx, stats)
                 if item:
                     items.append(item)
+                path = Path(rec["SourceFile"])
+                sig = file_sig(path)
+                if sig:
+                    delta = {k: stats[k] - before[k] for k in stats if stats[k] != before[k]}
+                    new_cache[str(path)] = {"sig": sig, "stats": delta, "item": item}
             set_progress(done=i + len(chunk))
+
         items.sort(key=lambda it: (it["folder"], it["name"]))
         with LOCK:
             STATE.update(items=items, stats=stats, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
-                         progress="Terminé", error=None)
+                         progress="Terminé", error=None, last_mode=mode,
+                         messages=([f"Analyse incrémentale : {len(to_scan)} fichier(s) relu(s), "
+                                    f"{reused} repris de l'analyse précédente."] if mode == "nouveaux" else []))
             ITEMS.clear()
             ITEMS.update({it["id"]: it for it in items})
+        save_cache(new_cache)
         save_results()
     except Exception as exc:
         set_progress(error=str(exc))
@@ -591,18 +657,27 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 input[type=datetime-local]{width:100%;padding:5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px}
 .res-ok{color:var(--ok);font-weight:600}.res-ko{color:var(--bad);font-weight:600}
-.prog{display:flex;flex-direction:column;gap:8px}.prog-head,.prog-foot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.prog{display:flex;flex-direction:column;gap:8px}.prog[hidden]{display:none}.prog-head,.prog-foot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .prog-foot span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
 .bar{height:12px;border-radius:6px;background:var(--line);overflow:hidden;position:relative}
 .fill{height:100%;width:0;background:var(--acc);border-radius:6px;transition:width .4s ease}
 .bar.indet .fill{width:30%;position:absolute;animation:indet 1.2s ease-in-out infinite}
 @keyframes indet{0%{left:-30%}100%{left:100%}}
+.scanbtns{display:flex;gap:8px}
 select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 </style></head><body>
 <header>
   <h1>Vérification des dates — Pellicule <span class="mute" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
-  <form method="post" action="{{ url_for('scan') }}"><button {% if state.running %}disabled{% endif %}>
-    {% if state.running %}{{ 'Correction en cours…' if state.kind == 'correction' else 'Analyse en cours…' }}{% else %}Lancer l'analyse{% endif %}</button></form>
+  <form id="scanform" method="post" action="{{ url_for('scan') }}" class="scanbtns">
+  {% if state.running %}
+    <button disabled>{{ 'Correction en cours…' if state.kind == 'correction' else 'Analyse en cours…' }}</button>
+  {% elif has_cache %}
+    <button name="mode" value="nouveaux" title="Analyse seulement les fichiers ajoutés ou modifiés depuis la dernière analyse">Scanner les nouveaux</button>
+    <button class="sec" name="mode" value="tout" onclick="return confirm('Relire tous les fichiers de la Pellicule ? Cela peut prendre du temps.')" title="Relit tous les fichiers">Tout rescanner</button>
+  {% else %}
+    <button name="mode" value="tout">Lancer l'analyse</button>
+  {% endif %}
+  </form>
   {% if items %}
   <select id="filtre" onchange="filtrer()">
     <option value="tous">Tout afficher</option><option value="écart">Écarts de date</option>
@@ -714,7 +789,8 @@ def index():
         groups.setdefault(it["folder"], []).append(it)
     messages = request.args.getlist("m") + list(state.get("messages") or [])
     return render_template_string(PAGE, state=state, items=items, groups=list(groups.items()),
-                                  tol=TOLERANCE_DAYS, messages=messages, version=__version__)
+                                  tol=TOLERANCE_DAYS, messages=messages, version=__version__,
+                                  has_cache=CACHE_FILE.exists())
 
 
 @app.post("/scan")
@@ -724,9 +800,11 @@ def scan():
             return redirect(url_for("index"))
         STATE.update(running=True, kind="analyse", error=None, messages=[], phase="Démarrage…",
                      progress="", done=0, total=0, started=None)
-    for f in THUMBS.glob("*.jpg"):
-        f.unlink(missing_ok=True)
-    threading.Thread(target=scan_worker, daemon=True).start()
+    mode = "nouveaux" if request.form.get("mode") == "nouveaux" and CACHE_FILE.exists() else "tout"
+    if mode == "tout":
+        for f in THUMBS.glob("*.jpg"):
+            f.unlink(missing_ok=True)
+    threading.Thread(target=scan_worker, args=(mode,), daemon=True).start()
     return redirect(url_for("index"))
 
 

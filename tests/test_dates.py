@@ -104,3 +104,39 @@ def test_progression(app):
     assert app.STATE["stats"]["fichiers"] == 250          # @eaDir ignoré
     assert vus[-1] == (250, 250)
     assert len([v for v in vus if v[0] > 0]) == 3          # 3 lots de 100 max : la barre avance
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_scan_nouveaux_et_tout(app):
+    dossier = app.SCAN_DIR / "2019" / "2019-07-14 Mariage"
+    dossier.mkdir(parents=True)
+    img = Image.new("RGB", (8, 8), "red")
+    for n in ("a.jpg", "b.jpg"):
+        img.save(dossier / n)
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-DateTimeOriginal=2019:07:14 10:00:00",
+                    str(dossier / "a.jpg")], check=True)
+    client = app.app.test_client()
+
+    app.scan_worker("tout")
+    assert app.CACHE_FILE.exists()
+    assert app.STATE["stats"]["ok"] == 1 and app.STATE["stats"]["sans_date"] == 1
+    assert "Scanner les nouveaux" in client.get("/").get_data(as_text=True)
+
+    # nouveau fichier + correction de b.jpg (modifié) → seuls ces deux-là sont relus
+    img.save(dossier / "c.jpg")
+    b = next(i for i in app.STATE["items"] if i["name"] == "b.jpg")
+    client.post("/apply", data={"sel": b["id"], f"date_{b['id']}": b["proposed"]})
+    app.APPLY_THREAD.join(timeout=60)
+    lus = []
+    origine = app.run_exiftool_files
+    app.run_exiftool_files = lambda paths: (lus.extend(p.name for p in paths), origine(paths))[1]
+    app.scan_worker("nouveaux")
+    assert sorted(lus) == ["b.jpg", "c.jpg"]
+    assert app.STATE["stats"]["fichiers"] == 3 and app.STATE["stats"]["ok"] == 2
+    assert [i["name"] for i in app.STATE["items"]] == ["c.jpg"]
+    assert "2 fichier(s) relu(s), 1 repris" in app.STATE["messages"][0]
+
+    lus.clear()
+    app.scan_worker("tout")
+    assert sorted(lus) == ["a.jpg", "b.jpg", "c.jpg"]
+    app.run_exiftool_files = origine
