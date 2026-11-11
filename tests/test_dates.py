@@ -196,3 +196,52 @@ def test_voisines_et_deja_corrigees(app):
     assert revenu["deja"]
     html = client.get("/").get_data(as_text=True)
     assert "Déjà corrigées (0)" in html and "écart toujours présent" in html
+
+
+def _video(path, *opts):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2", *opts, str(path)], check=True)
+
+
+@pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
+def test_conversion_mp4(app):
+    dossier = app.SCAN_DIR / "2015" / "2015-06-20 Fête"
+    dossier.mkdir(parents=True)
+    _video(dossier / "clip.avi", "-c:v", "mjpeg", "-c:a", "pcm_s16le")
+    _video(dossier / "clip2.mkv", "-c:v", "libx264", "-c:a", "aac")
+    _video(dossier / "00001.mts", "-c:v", "libx264", "-c:a", "ac3", "-f", "mpegts")
+    app.scan_worker("tout")
+    items = {i["name"]: i for i in app.STATE["items"]}
+    assert set(items) == {"clip.avi", "clip2.mkv", "00001.mts"}
+    assert all(i["convertir"] for i in items.values())
+    client = app.app.test_client()
+    assert 'data-convertir="1"' in client.get("/").get_data(as_text=True)
+
+    data = {"sel": [i["id"] for i in items.values()]}
+    for i in items.values():
+        data[f"date_{i['id']}"] = "2015-06-20T15:30:00"
+    client.post("/apply", data=data)
+    app.APPLY_THREAD.join(timeout=300)
+    for nom, it in items.items():
+        assert it["result"]["ok"], (nom, it["result"])
+    restants = sorted(p.name for p in dossier.iterdir())
+    assert restants == ["00001.mp4", "clip.mp4", "clip2.mp4"]       # originaux supprimés, pas de fichier temporaire
+    assert "copie sans perte" in items["clip2.mkv"]["result"]["msg"]
+
+    app.scan_worker("nouveaux")
+    assert app.STATE["items"] == []                                   # les MP4 ont la bonne date
+    assert "Déjà corrigées (3)" in client.get("/").get_data(as_text=True)
+
+
+@pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
+def test_conversion_garde_original(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "ORIGINALS_DIR", str(tmp_path / "originaux"))
+    dossier = app.SCAN_DIR / "2015" / "2015-06-20 Fête"
+    dossier.mkdir(parents=True)
+    _video(dossier / "clip.avi", "-c:v", "mjpeg", "-c:a", "pcm_s16le")
+    app.scan_worker("tout")
+    it = app.STATE["items"][0]
+    ok, msg, new = app.convert_and_date(it, app.dt.datetime(2015, 6, 20, 15, 30))
+    assert ok, msg
+    assert (tmp_path / "originaux" / "Pellicule" / "2015" / "2015-06-20 Fête" / "clip.avi").exists()
+    assert new.name == "clip.mp4" and new.exists()

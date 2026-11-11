@@ -24,6 +24,8 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
    - vidéos : dates QuickTime ;
    - dans tous les cas : sidecar `.xmp` s'il existe, et date de modification du fichier.
 
+   - vidéos **AVI, MTS/M2TS et MKV** : exiftool ne sait pas écrire de date dans ces formats. La vidéo est donc **convertie en MP4** : les flux sont copiés sans perte, l'audio n'est réencodé en AAC que si nécessaire, et la vidéo en H.264 en dernier recours. Le MP4 est d'abord écrit dans un fichier temporaire, où la date est inscrite puis vérifiée, tout comme la durée. Le fichier est ensuite renommé, et l'original est **supprimé**, ou déplacé dans `ORIGINALS_DIR` si cette variable est définie. Si une étape échoue, l'original reste intact. Immich verra le MP4 comme un nouveau fichier.
+
    Ensuite, la page **relit** le fichier pour vérifier l'écriture, et inscrit chaque correction dans `/data/corrections.csv`.
 6. **Range les photos corrigées** dans la vue « Déjà corrigées » (avant → après), hors de la liste à traiter. Si un nouveau scan trouve encore un écart sur une photo corrigée, elle revient dans « À traiter » avec la mention « Déjà corrigée le … ».
 7. **Immich (facultatif)** : la page affiche la date connue d'Immich et ses miniatures. Après correction, elle lui demande de relire les métadonnées.
@@ -60,6 +62,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
 | `IMMICH_URL`, `IMMICH_API_KEY`, `IMMICH_ROOT` | — | Accès à Immich (facultatif) |
 | `DATA_DIR` | `/data` | Résultats, cache, miniatures, journal des corrections, photos corrigées |
 | `PORT` | `8099` | Port de la page |
+| `ORIGINALS_DIR` | — | Si défini : dossier où déplacer les vidéos d'origine après conversion en MP4 (sinon elles sont supprimées). À placer hors de la bibliothèque Immich. |
 
 ### Permissions de la clé API Immich
 

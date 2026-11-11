@@ -10,6 +10,9 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   les autres sont repris du cache) et « Tout rescanner »
 - Cohérence avec les autres photos du dossier (« voisines ») : jour dominant proposé quand le nom
   du fichier ne donne pas de date, et alerte si la date choisie sort de la période des voisines
+- Vidéos AVI, MTS/M2TS et MKV (date non inscriptible par exiftool) : converties en MP4 (flux copiés
+  sans perte, réencodage seulement si nécessaire), date écrite et vérifiée, puis original supprimé
+  (ou déplacé dans ORIGINALS_DIR si défini)
 - Photos corrigées retirées de la liste « À traiter » et rangées dans « Déjà corrigées »
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
 - Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
@@ -17,9 +20,10 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import calendar
+import shutil
 from collections import Counter
 import csv
 import datetime as dt
@@ -54,6 +58,7 @@ TOLERANCE_DAYS = int(os.environ.get("TOLERANCE_DAYS", "1"))
 TZ = ZoneInfo(os.environ.get("TZ", "Europe/Paris"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 PORT = int(os.environ.get("PORT", "8099"))
+ORIGINALS_DIR = os.environ.get("ORIGINALS_DIR", "").strip()   # vide : originaux convertis supprimés
 
 THUMBS = DATA_DIR / "thumbs"
 RESULTS_FILE = DATA_DIR / "results.json"
@@ -69,6 +74,7 @@ PHOTO_EXT = {"jpg", "jpeg", "heic", "heif", "png", "webp", "gif", "tif", "tiff"}
 VIDEO_EXT = {"mov", "mp4", "m4v", "3gp", "avi", "mkv", "mts", "m2ts"}
 RAW_EXT = {"dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "pef", "srw"}
 ALL_EXT = PHOTO_EXT | VIDEO_EXT | RAW_EXT
+NEEDS_MP4 = {"avi", "mts", "m2ts", "mkv"}   # exiftool ne sait pas y écrire de date
 
 READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateDate", "-FileModifyDate"]
 DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateDate"]
@@ -443,6 +449,7 @@ def apply_neighbors(items, voisins):
     propose le jour dominant des voisines (heure d'origine conservée)."""
     fmt_in = "%Y-%m-%dT%H:%M:%S"
     for it in items:
+        it["convertir"] = Path(it["path"]).suffix.lstrip(".").lower() in NEEDS_MP4
         it["proposed"], it["proposed_src"] = it.get("proposed_base", it["proposed"]), it.get("proposed_src_base", "")
         it["voisins"], it["choice_voisins"] = None, ""
         dates = sorted(dt.datetime.strptime(d, FMT) for p, d, ok in voisins.get(it["folder"], [])
@@ -605,6 +612,77 @@ def load_results():
 
 
 # --------------------------------------------------------------------------- correction
+def probe_duration(path: Path):
+    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True)
+    try:
+        return float(p.stdout.strip())
+    except ValueError:
+        return None
+
+
+def remux_mp4(src: Path, dst: Path):
+    """Copie sans perte vers MP4 ; à défaut réencode l'audio (AAC), puis tout (H.264 + AAC)."""
+    base = ["ffmpeg", "-y", "-loglevel", "error", "-fflags", "+genpts", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "-1", "-movflags", "+faststart"]
+    essais = [
+        ("copie sans perte", ["-c", "copy"]),
+        ("vidéo copiée, son réencodé", ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]),
+        ("réencodée", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                       "-c:a", "aac", "-b:a", "192k"]),
+    ]
+    derniere = ""
+    for libelle, opts in essais:
+        dst.unlink(missing_ok=True)
+        p = subprocess.run(base + opts + [str(dst)], capture_output=True, text=True)
+        if p.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
+            return libelle, ""
+        derniere = (p.stderr or "").strip().splitlines()[-1:] or ["échec ffmpeg"]
+        derniere = derniere[0][:200]
+    dst.unlink(missing_ok=True)
+    return None, derniere
+
+
+def convert_and_date(item, nd: dt.datetime):
+    """AVI/MTS/MKV → MP4 daté. L'original n'est supprimé qu'après vérification de la copie et de sa date."""
+    src = Path(item["path"])
+    final = src.with_suffix(".mp4")
+    if final.exists():
+        final = src.with_name(f"{src.stem}-{src.suffix.lstrip('.').lower()}.mp4")
+    if final.exists():
+        return False, f"{final.name} existe déjà : conversion annulée", None
+    tmp = src.with_name(f".{src.stem}.conversion.mp4")
+    mode, err = remux_mp4(src, tmp)
+    if not mode:
+        return False, f"conversion MP4 impossible : {err}", None
+    d_src, d_tmp = probe_duration(src), probe_duration(tmp)
+    if d_src and (not d_tmp or abs(d_src - d_tmp) > max(1.0, d_src * 0.01)):
+        tmp.unlink(missing_ok=True)
+        return False, f"durée différente après conversion ({d_src:.1f} s → {d_tmp or 0:.1f} s) : original conservé", None
+    tmp_item = dict(item, path=str(tmp), has_creationdate=False)
+    ok, msg = write_date(tmp_item, nd)
+    if ok:
+        ok, msg = verify(tmp_item, nd)
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        return False, f"date non écrite dans le MP4 : {msg}", None
+    tmp.rename(final)
+    os.utime(final, (nd.timestamp(), nd.timestamp()))
+    # sidecar éventuel de l'original : suit la vidéo
+    for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
+        if sc.exists():
+            sc.rename(Path(str(final) + ".xmp"))
+    if ORIGINALS_DIR:
+        dest = Path(ORIGINALS_DIR) / src.relative_to(LOCAL_ROOT)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        sort = f"original déplacé dans {dest}"
+    else:
+        src.unlink()
+        sort = "original supprimé"
+    return True, f"converti en {final.name} ({mode}), {msg}, {sort}", final
+
+
 def write_date(item, nd: dt.datetime):
     path = Path(item["path"])
     v = nd.strftime("%Y:%m:%d %H:%M:%S")
@@ -798,7 +876,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button></div>
   <div class="grid">
   {% for it in group %}
-    <div class="card" data-status="{{ it.status }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
+    <div class="card" data-status="{{ it.status }}" data-convertir="{{ 1 if it.convertir else 0 }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
       <img loading="lazy" src="{{ url_for('thumb', item_id=it.id) }}" alt="">
       <div class="body">
         <div class="name">{{ it.name }}</div>
@@ -808,6 +886,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
         {% if it.name_date %}<div>Nom du fichier : {{ it.name_date }}</div>{% endif %}
         {% if it.immich_date %}<div class="mute">Immich : {{ it.immich_date }}</div>{% endif %}
         <div class="mute">Voisines : {{ it.voisins.label if it.voisins else "pas assez d'autres photos datées dans le dossier" }}</div>
+        {% if it.convertir %}<div class="res-ko" style="font-weight:500">⚠ Format où la date ne peut pas être écrite : la vidéo sera convertie en .mp4 (sans perte si possible), puis l'original {{ 'déplacé' if originals_dir else 'supprimé' }}. Immich la verra comme un nouveau fichier.</div>{% endif %}
         {% if it.deja %}<div class="res-ko">Déjà corrigée le {{ it.deja }}, écart toujours présent</div>{% endif %}
         {% if it.result and not it.result.ok %}<div class="res-ko">✗ échec — {{ it.result.msg }}</div>{% endif %}
         {% if it.status == 'à trancher' or not it.proposed %}
@@ -842,6 +921,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
         <div><span class="tag t-ok">corrigée</span> <span class="mute">{{ r.kind }} · le {{ r.quand }}</span></div>
         <div class="mute">Avant : {{ r.avant }}</div>
         <div>Après : <strong>{{ r.apres }}</strong></div>
+        {% if r.note %}<div class="mute">{{ r.note.split(', relu')[0] }}</div>{% endif %}
       </div>
     </div>
   {% endfor %}
@@ -901,7 +981,9 @@ function confirmer(){
   if(!n){alert('Aucun fichier coché.');return false}
   const ko=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.coh==='0').length;
   if(ko&&!confirm(ko+' photo(s) cochée(s) ont une date hors de la période des autres photos du dossier. Continuer quand même ?'))return false;
-  return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original). Continuer ?')}
+  const conv=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.convertir==='1').length;
+  return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original).'
+    +(conv?'\n\n'+conv+' vidéo(s) AVI/MTS/MKV seront converties en MP4 et leur original {{ 'déplacé' if originals_dir else 'SUPPRIMÉ' }}.':'')+'\n\nContinuer ?')}
 </script>
 </body></html>"""
 
@@ -926,7 +1008,7 @@ def index():
     return render_template_string(PAGE, state=state, pending=pending, groups=list(groups.items()),
                                   corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__,
-                                  has_cache=CACHE_FILE.exists())
+                                  has_cache=CACHE_FILE.exists(), originals_dir=bool(ORIGINALS_DIR))
 
 
 @app.post("/scan")
@@ -956,10 +1038,17 @@ def apply_worker(jobs):
                 item["result"] = {"ok": False, "msg": "date saisie invalide"}
                 ko_count += 1
             else:
-                ok, msg = write_date(item, nd)
-                if ok:
-                    ok, msg = verify(item, nd)
-                log_correction(item, nd, ok, msg)
+                if Path(item["path"]).suffix.lstrip(".").lower() in NEEDS_MP4:
+                    set_progress(progress=f"Conversion en MP4 : {item['name']}")
+                    ok, msg, new_path = convert_and_date(item, nd)
+                    log_correction(item, nd, ok, msg)
+                    if ok:
+                        item.update(path=str(new_path), name=new_path.name, immich_id=None)
+                else:
+                    ok, msg = write_date(item, nd)
+                    if ok:
+                        ok, msg = verify(item, nd)
+                    log_correction(item, nd, ok, msg)
                 item["result"] = {"ok": ok, "msg": msg}
                 THUMBS.joinpath(f"{item['id']}.jpg").unlink(missing_ok=True)
                 if ok:
@@ -969,6 +1058,7 @@ def apply_worker(jobs):
                             "folder": item["folder"], "kind": item["kind"], "immich_id": item.get("immich_id"),
                             "avant": item["date"] or "sans date", "source": item.get("source", ""),
                             "apres": nd.strftime("%d/%m/%Y %H:%M:%S"),
+                            "note": msg if msg.startswith("converti") else "",
                             "quand": dt.datetime.now().strftime("%d/%m/%Y %H:%M")}
                     save_corrected()
                     ok_count += 1
