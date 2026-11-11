@@ -20,6 +20,9 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
    L'heure d'origine est conservée, ou 12:00 si la photo n'a pas d'heure. Pour une photo à trancher, rien n'est proposé d'office : des boutons Dossier / Nom / Voisines te laissent choisir.
 4. **Contrôle la cohérence** : chaque carte indique si la date choisie tombe dans la période des voisines (± tolérance). Une alerte ⚠ s'affiche sinon, un filtre regroupe ces photos, et une confirmation est demandée avant de les corriger.
    **Par dossier**, une barre d'actions applique d'un coup à toutes les photos du dossier l'un de ces choix : la date du nom, celle des voisines, celle du dossier, les dates proposées, ou un même jour en gardant l'heure de chaque photo. Chaque photo réglée est cochée. Le bouton « Corriger ce dossier » ne corrige ensuite que ce dossier.
+   **Dossier mal daté**, quand les photos ont la bonne date mais pas le dossier (par exemple « 2007 - … » rempli de photos du 03/02/2008), deux solutions :
+   - « Les dates des photos sont bonnes » : aucun fichier n'est modifié. Les photos ne sont plus signalées tant qu'elles ne changent pas (`/data/validees.json`), et elles apparaissent dans « Déjà corrigées » ;
+   - « Renommer le dossier » : un nouveau nom est proposé d'après la date majoritaire des photos (`2008/2008-02-03 Bisca et dune du pila`), et il reste modifiable. Le dossier est déplacé sur le NAS, puis une analyse des fichiers déplacés est relancée. Immich verra ces photos comme de nouveaux fichiers.
 5. **Corrige uniquement les photos cochées**. La date est écrite dans le fichier, sans laisser de copie `_original`. Selon le type de fichier :
    - photos : EXIF et décalage horaire ;
    - vidéos : dates QuickTime ;

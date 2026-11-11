@@ -358,3 +358,53 @@ def test_renommage_nom_deja_pris(app):
     assert ok, msg
     assert (dossier / "b-heic.jpg").exists() and (dossier / "b.jpg").exists()
     assert notes[0] == "renommé en b-heic.jpg"
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_dossier_mal_date_valider_ou_renommer(app):
+    bisca = app.SCAN_DIR / "2007" / "2007 - Bisca et dune du pila"
+    bisca.mkdir(parents=True)
+    img = Image.new("RGB", (8, 8), "blue")
+    for n in ("2008-02-03-115924195.jpg", "2008-02-03-115946196.jpg", "2008-02-03-120101000.jpg"):
+        img.save(bisca / n)
+    _exif(bisca / "2008-02-03-115924195.jpg", "2008:02:03 11:59:24")
+    autre = app.SCAN_DIR / "2009" / "2009 - Pâques"
+    autre.mkdir(parents=True)
+    for n in ("2010-04-04-100000.jpg", "2010-04-05-100000.jpg"):
+        img.save(autre / n)
+    client = app.app.test_client()
+
+    app.scan_worker("tout")
+    folders = app.STATE["folders"]
+    assert folders["2007/2007 - Bisca et dune du pila"]["nouveau"] == "2008/2008-02-03 Bisca et dune du pila"
+    assert folders["2009/2009 - Pâques"]["nouveau"] == "2010/2010-04 Pâques"
+    html = client.get("/").get_data(as_text=True)
+    assert "2008/2008-02-03 Bisca et dune du pila" in html and "3/3 photos datées du 03/02/2008" in html
+
+    # validation telle quelle : plus signalées, rien de modifié
+    avant = {p.name: p.stat().st_mtime_ns for p in bisca.iterdir()}
+    r = client.post("/valider", json={"folder": "2007/2007 - Bisca et dune du pila"})
+    assert r.get_json()["n"] == 3
+    assert "Déjà corrigées (3)" in client.get("/").get_data(as_text=True)
+    app.scan_worker("nouveaux")
+    assert {i["folder"] for i in app.STATE["items"]} == {"2009/2009 - Pâques"}
+    assert app.STATE["stats"]["valide"] == 3
+    assert {p.name: p.stat().st_mtime_ns for p in bisca.iterdir()} == avant
+
+    # renommage proposé
+    r = client.post("/renommer", json={"folder": "2009/2009 - Pâques", "nouveau": "2010/2010-04 Pâques"})
+    assert r.get_json()["ok"]
+    for _ in range(100):
+        if not app.STATE["running"]:
+            break
+        app.time_sleep(0.1)
+    assert (app.SCAN_DIR / "2010" / "2010-04 Pâques" / "2010-04-04-100000.jpg").exists()
+    assert not autre.exists()
+    # dossier bien daté : plus de conflit nom/dossier, reste à écrire la date (photos sans EXIF)
+    assert {i["status"] for i in app.STATE["items"]} == {"sans date"}
+    assert sorted(i["proposed"] for i in app.STATE["items"]) == ["2010-04-04T10:00:00", "2010-04-05T10:00:00"]
+    assert "Dossier renommé" in app.STATE["messages"][0]
+
+    # garde-fous
+    assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "../evasion"}).status_code == 400
+    assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "2010/2010-04 Pâques"}).status_code == 409

@@ -19,6 +19,8 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   dans DATA_DIR/originaux-nettoyes) ; fichiers illisibles : signalés « abîmé », jamais modifiés
 - Actions par dossier : appliquer d'un coup la date du nom, des voisines, du dossier, la date proposée
   ou un même jour à toutes les photos du dossier, puis « Corriger ce dossier »
+- Dossier mal daté : « Les dates des photos sont bonnes » (validation sans modification, plus signalées
+  tant que le fichier ne change pas) ou renommage du dossier proposé d'après les dates des photos
 - Estimation du temps pour chaque étape (index Immich, recensement, analyse) et au total, à partir
   du nombre de photos dans Immich et des durées mesurées lors de l'analyse précédente
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
@@ -27,7 +29,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 import calendar
 import shutil
@@ -41,6 +43,7 @@ import os
 import re
 import subprocess
 import threading
+from time import sleep as time_sleep
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -114,6 +117,10 @@ STATE = {
 }
 ITEMS = {}
 CORRECTED = {}   # chemin → enregistrement de la correction
+VALIDATED = {}   # chemin → signature (taille, date de modification) au moment de la validation
+VALIDATED_FILE = DATA_DIR / "validees.json"
+STATUS_KEY = {"écart": "ecart", "sans date": "sans_date", "à trancher": "a_trancher", "abîmé": "abime"}
+RE_DATE_PREFIX = re.compile(r"^\d{4}(?:[-_.]\d{2}){0,2}\s*(?:[-–_]\s*)?")
 
 
 # --------------------------------------------------------------------------- utilitaires
@@ -688,6 +695,63 @@ def apply_neighbors(items, voisins):
                 it["proposed"], it["proposed_src"] = it["choice_voisins"], "autres photos du dossier"
 
 
+def load_validated():
+    try:
+        VALIDATED.update(json.loads(VALIDATED_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+
+
+def save_validated():
+    tmp = VALIDATED_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(VALIDATED, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(VALIDATED_FILE)
+
+
+def propose_folder(folder: str, entries):
+    """Si la majorité des photos datées contredit la date du dossier, propose un nouveau chemin
+    « année/AAAA-MM-JJ évènement » (ou AAAA-MM / AAAA selon la dispersion des dates)."""
+    parts = Path(folder).parts
+    ref = folder_ref(parts)
+    if not parts or ref is None:
+        return None
+    dates = []
+    for p, d, _ok in entries:
+        if d:
+            dates.append(dt.datetime.strptime(d, FMT))
+        else:
+            nd, _ = name_date(Path(p).name)
+            if nd:
+                dates.append(nd)
+    if len(dates) < 1:
+        return None
+    hors = [x for x in dates if gap_days(ref, x) > TOLERANCE_DAYS]
+    if len(hors) * 2 < len(dates):
+        return None
+    n = len(dates)
+    jour, nj = Counter(x.date() for x in dates).most_common(1)[0]
+    mois, nm = Counter((x.year, x.month) for x in dates).most_common(1)[0]
+    an, na = Counter(x.year for x in dates).most_common(1)[0]
+    if nj * 2 > n:
+        prefixe, label = jour.strftime("%Y-%m-%d"), f"{nj}/{n} photos datées du {jour:%d/%m/%Y}"
+    elif nm * 2 > n:
+        prefixe, label = f"{mois[0]}-{mois[1]:02d}", f"{nm}/{n} photos datées de {mois[1]:02d}/{mois[0]}"
+    elif na * 2 > n:
+        prefixe, label = str(an), f"{na}/{n} photos datées de {an}"
+    else:
+        return None
+    evenement = RE_DATE_PREFIX.sub("", parts[-1]).strip()
+    nom = f"{prefixe} {evenement}".strip()
+    annee = prefixe[:4]
+    if len(parts) >= 2 and re.fullmatch(r"\d{4}", parts[-2]):
+        nouveau = Path(*parts[:-2], annee, nom)
+    else:
+        nouveau = Path(*parts[:-1], nom)
+    if str(nouveau) == folder:
+        return None
+    return {"nouveau": str(nouveau).replace("\\", "/"), "label": label}
+
+
 def load_corrected():
     try:
         CORRECTED.update(json.loads(CORRECTED_FILE.read_text(encoding="utf-8")))
@@ -818,12 +882,27 @@ def scan_worker(mode="tout"):
             set_progress(done=i + len(chunk))
 
         apply_neighbors(items, voisins)
+        gardes = []
+        for it in items:   # photos validées telles quelles : plus signalées tant que le fichier n'a pas changé
+            sig = VALIDATED.get(it["path"])
+            if sig and sig == file_sig(Path(it["path"])):
+                stats[STATUS_KEY.get(it["status"], "ecart")] -= 1
+                stats["valide"] = stats.get("valide", 0) + 1
+            else:
+                gardes.append(it)
+        items = gardes
+        dossiers_signales = {it["folder"] for it in items}
+        folders = {}
+        for dossier in dossiers_signales:
+            prop = propose_folder(dossier, voisins.get(dossier, []))
+            if prop:
+                folders[dossier] = prop
         for it in items:   # photo déjà corrigée mais toujours en écart : signalée à nouveau
             rec = CORRECTED.get(it["path"])
             it["deja"] = rec["quand"] if rec else ""
         items.sort(key=lambda it: (it["folder"], it["name"]))
         with LOCK:
-            STATE.update(items=items, stats=stats, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+            STATE.update(items=items, stats=stats, folders=folders, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
                          progress="Terminé", error=None, last_mode=mode,
                          messages=([f"Analyse incrémentale : {len(to_scan)} fichier(s) relu(s), "
                                     f"{reused} repris de l'analyse précédente."] if mode == "nouveaux" else []))
@@ -850,7 +929,7 @@ def scan_worker(mode="tout"):
 
 def save_results():
     with LOCK:
-        data = {k: STATE[k] for k in ("items", "stats", "immich", "scanned_at")}
+        data = {k: STATE.get(k) for k in ("items", "stats", "immich", "scanned_at", "folders")}
     RESULTS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
@@ -1063,7 +1142,7 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .folder-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
 .folder-actions button{padding:5px 10px;font-size:13px}.folder-actions .jour{display:inline-flex;gap:4px}
 .folder-actions input[type=date]{padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
-.dossier-info{font-size:12px}
+.dossier-info{font-size:12px}.folder-actions.renommage input[type=text]{flex:1;min-width:200px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
 .card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
@@ -1123,7 +1202,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   <span class="stats">
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
   {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·{% if state.stats.abime %} {{ state.stats.abime }} abîmé(s) ·{% endif %}
-  {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}</span>
+  {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}{% if state.stats and state.stats.valide %} · {{ state.stats.valide }} validée(s) telles quelles{% endif %}</span>
 </header>
 <main>
 <div id="prog" class="msg prog" {% if not state.running %}hidden{% endif %}>
@@ -1140,7 +1219,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 <form id="f" method="post" action="{{ url_for('apply') }}">
 {% for folder, group in groups %}
   {% set modifiables = group|rejectattr('status', 'equalto', 'abîmé')|list %}
-  <div class="folder" data-folder>
+  <div class="folder" data-folder data-nom="{{ folder }}">
     <div class="folder-titre"><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }} · {{ group|length }} photo(s)</span></div>
     {% if modifiables %}
     <div class="folder-actions">
@@ -1152,7 +1231,13 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
       <span class="jour"><input type="date" class="dossier-jour" aria-label="Même jour pour tout le dossier"><button class="sec" type="button" onclick="appliquerDossier(this,'jour')">Même jour pour toutes</button></span>
       <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button>
       <button type="button" onclick="corrigerDossier(this)">Corriger ce dossier</button>
+      <button class="sec" type="button" onclick="validerDossier(this)" title="Le dossier est mal daté mais les photos ont la bonne date : rien n'est modifié">Les dates des photos sont bonnes</button>
       <span class="dossier-info mute"></span>
+    </div>
+    <div class="folder-actions renommage">
+      <span class="mute">{% if state.folders and state.folders.get(folder) %}Dossier mal daté ? {{ state.folders[folder].label }} — renommer en :{% else %}Renommer le dossier :{% endif %}</span>
+      <input type="text" class="dossier-nom" value="{{ state.folders[folder].nouveau if state.folders and state.folders.get(folder) else folder }}" size="40" aria-label="Nouveau nom du dossier">
+      <button class="sec" type="button" onclick="renommerDossier(this)">Renommer le dossier</button>
     </div>
     {% endif %}
   </div>
@@ -1235,6 +1320,17 @@ function appliquerDossier(btn,type){
     if(!v){sautes++;return}
     inp.value=v;coherence(inp);b.checked=true;faits++});
   info.textContent=faits+' photo(s) réglée(s) et cochée(s)'+(sautes?', '+sautes+' sans date de ce type (inchangées)':'')+' — vérifie puis « Corriger ce dossier ».'}
+async function poster(url,corps){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corps)});
+  let j={};try{j=await r.json()}catch(e){}return [r.ok,j]}
+async function validerDossier(btn){const nom=btn.closest('[data-folder]').dataset.nom;
+  if(!confirm('Les photos de « '+nom+' » gardent leur date actuelle et ne seront plus signalées (sauf les photos sans date). Aucun fichier n\u2019est modifié. Continuer ?'))return;
+  const [ok,j]=await poster('{{ url_for('valider') }}',{folder:nom});
+  if(!ok){alert('Échec : '+(j.msg||'erreur'));return}location.replace('{{ url_for('index') }}')}
+async function renommerDossier(btn){const h=btn.closest('[data-folder]'),nom=h.dataset.nom,neuf=h.querySelector('.dossier-nom').value.trim();
+  if(!neuf||neuf===nom){alert('Indique le nouveau nom du dossier.');return}
+  if(!confirm('Renommer « '+nom+' » en « '+neuf+' » sur le NAS ?\\n\\nImmich verra ces photos comme de nouveaux fichiers. Une analyse des fichiers déplacés est relancée ensuite.'))return;
+  const [ok,j]=await poster('{{ url_for('renommer') }}',{folder:nom,nouveau:neuf});
+  if(!ok){alert('Échec : '+(j.msg||'erreur'));return}location.replace('{{ url_for('index') }}')}
 function corrigerDossier(btn){
   const grille=grilleDe(btn),autres=[...document.querySelectorAll('input[name=sel]')].filter(b=>!grille.contains(b));
   if(!grille.querySelector('input[name=sel]:checked')){alert('Aucune photo cochée dans ce dossier.');return}
@@ -1467,6 +1563,90 @@ def progress():
     return st
 
 
+@app.post("/valider")
+def valider():
+    """Le dossier est mal daté mais les dates des photos sont bonnes : rien n'est modifié,
+    les photos ne sont plus signalées (tant que le fichier ne change pas)."""
+    folder = (request.get_json(silent=True) or {}).get("folder", "")
+    n = 0
+    with LOCK:
+        if STATE["running"]:
+            return {"ok": False, "msg": "une tâche est en cours"}, 409
+        for it in STATE["items"]:
+            if it["folder"] != folder or it["status"] in ("abîmé", "sans date") or (it.get("result") or {}).get("ok"):
+                continue
+            sig = file_sig(Path(it["path"]))
+            if not sig:
+                continue
+            VALIDATED[it["path"]] = sig
+            date = it["date"] or "—"
+            CORRECTED[it["path"]] = {
+                "id": it["id"], "path": it["path"], "name": it["name"], "folder": it["folder"],
+                "kind": it["kind"], "immich_id": it.get("immich_id"), "avant": date, "source": it.get("source", ""),
+                "apres": date, "note": "dates validées telles quelles (fichier non modifié)",
+                "quand": dt.datetime.now().strftime("%d/%m/%Y %H:%M")}
+            it["result"] = {"ok": True, "msg": "validée sans modification"}
+            n += 1
+    save_validated()
+    save_corrected()
+    save_results()
+    return {"ok": True, "n": n}
+
+
+@app.post("/renommer")
+def renommer():
+    """Renomme (déplace) un dossier de la Pellicule, puis relance une analyse des nouveaux fichiers."""
+    data = request.get_json(silent=True) or {}
+    folder, nouveau = data.get("folder", ""), (data.get("nouveau") or "").strip().strip("/")
+    src = (SCAN_DIR / folder).resolve()
+    dst = (SCAN_DIR / nouveau).resolve()
+    racine = SCAN_DIR.resolve()
+    if not nouveau or ".." in Path(nouveau).parts or racine not in dst.parents or racine not in src.parents:
+        return {"ok": False, "msg": "chemin invalide"}, 400
+    if not src.is_dir():
+        return {"ok": False, "msg": "dossier introuvable"}, 404
+    if dst.exists():
+        return {"ok": False, "msg": f"« {nouveau} » existe déjà"}, 409
+    if src in dst.parents:
+        return {"ok": False, "msg": "impossible de déplacer un dossier dans lui-même"}, 400
+    with LOCK:
+        if STATE["running"]:
+            return {"ok": False, "msg": "une tâche est en cours"}, 409
+        STATE.update(running=True, kind="analyse", error=None, messages=[], phase="Renommage du dossier…",
+                     progress="", done=0, total=0, started=None, steps=[], total_estime=False)
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            src.rename(dst)
+        except OSError:
+            shutil.move(str(src), str(dst))
+    except Exception as exc:
+        set_progress(running=False, kind="", phase="", error=f"renommage impossible : {exc}")
+        return {"ok": False, "msg": str(exc)}, 500
+    ancien, neuf = str(SCAN_DIR / folder), str(SCAN_DIR / nouveau)
+    with LOCK:   # les photos corrigées ou validées suivent le dossier
+        for store in (CORRECTED, VALIDATED):
+            for p in [p for p in store if p == ancien or p.startswith(ancien + os.sep)]:
+                rec = store.pop(p)
+                q = neuf + p[len(ancien):]
+                if isinstance(rec, dict):
+                    rec = dict(rec, path=q, folder=str(Path(q).parent.relative_to(SCAN_DIR)), name=Path(q).name)
+                store[q] = rec
+    save_corrected()
+    save_validated()
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f, delimiter=";").writerow([dt.datetime.now().isoformat(timespec="seconds"), ancien, "", "dossier",
+                                               neuf, "ok", "dossier renommé"])
+
+    def suite():
+        scan_worker("nouveaux")
+        with LOCK:
+            STATE["messages"] = [f"Dossier renommé : « {folder} » → « {nouveau} ». Immich verra ces photos "
+                                 f"comme de nouveaux fichiers au prochain scan de la bibliothèque."] + STATE["messages"]
+    threading.Thread(target=suite, daemon=True).start()
+    return {"ok": True}
+
+
 @app.get("/thumb/<item_id>")
 def thumb(item_id):
     item = ITEMS.get(item_id) or next((r for r in list(CORRECTED.values()) if r["id"] == item_id), None)
@@ -1490,6 +1670,7 @@ def journal():
 if __name__ == "__main__":
     load_results()
     load_corrected()
+    load_validated()
     if not SCAN_DIR.is_dir():
         print(f"ATTENTION : dossier introuvable {SCAN_DIR}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
