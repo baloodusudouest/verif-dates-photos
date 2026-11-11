@@ -32,5 +32,5 @@ RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 8099
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
-  CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8099\")}/', timeout=5)"
+  CMD python -c "import urllib.request,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8099\")}/health', timeout=5)"
 CMD ["python", "/app/app.py"]

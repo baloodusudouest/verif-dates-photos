@@ -12,6 +12,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 
+MDP = "essai"
+
+
 @pytest.fixture()
 def app(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ROOT", str(tmp_path / "photos"))
@@ -19,13 +22,27 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("TZ", "Europe/Paris")
     for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VERIF_PASSWORD", MDP)
+    monkeypatch.delenv("VERIF_LECTURE_SEULE", raising=False)
     import app as module
-    return importlib.reload(module)
+    module = importlib.reload(module)
+
+    # 1.11.0 : l'outil a un mot de passe. Le client de test ouvre la session en naissant, pour que
+    # les tests d'avant gardent leurs gestes et leurs attentes tels quels.
+    from flask.testing import FlaskClient
+
+    class ClientConnecte(FlaskClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            assert self.post("/connexion", data={"mot_de_passe": MDP}).status_code == 302
+
+    module.app.test_client_class = ClientConnecte
+    return module
 
 
 @pytest.mark.parametrize("parts,attendu", [
     (("2019", "2019-07-14 Mariage"), ("jour", 2019, 7, 14)),
-    (("1998", "1998-07 Numérisation Yves"), ("mois", 1998, 7, None)),
+    (("1998", "1998-07 Numérisation"), ("mois", 1998, 7, None)),
     (("2008", "2008 - BURGER !!!"), ("an", 2008, None, None)),
     (("Divers",), None),
 ])
@@ -471,3 +488,59 @@ def test_realignement_video_autre_fuseau(app):
     app.realign_worker(app.videos_a_realigner())
     assert app.videos_a_realigner() == []
     assert "1 vidéo(s) réalignée(s)" in app.STATE["messages"][0]
+
+
+def _empreintes(racine):
+    import hashlib
+    return {str(f.relative_to(racine)): (hashlib.sha256(f.read_bytes()).hexdigest(), f.stat().st_mtime_ns)
+            for f in sorted(racine.rglob("*")) if f.is_file()}
+
+
+def test_111_rien_sans_mot_de_passe(app, monkeypatch):
+    from flask.testing import FlaskClient
+    anonyme = FlaskClient(app.app)
+    assert anonyme.get("/health").get_json()["ok"] is True
+    r = anonyme.get("/")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/connexion")
+    for chemin in ("/progress", "/journal.csv", "/thumb/x"):
+        assert anonyme.get(chemin).status_code == 401
+    for chemin in ("/scan", "/apply", "/valider", "/renommer", "/realigner"):
+        assert anonyme.post(chemin).status_code == 401
+    assert anonyme.post("/connexion", data={"mot_de_passe": "faux"}).status_code == 401
+    assert anonyme.get("/").status_code == 302                              # toujours dehors
+    assert anonyme.post("/connexion", data={"mot_de_passe": MDP}).status_code == 302
+    assert anonyme.get("/").status_code == 200
+    assert anonyme.post("/deconnexion").status_code == 302 and anonyme.get("/progress").status_code == 401
+    # sans mot de passe configuré, l'outil ne s'ouvre pas du tout
+    monkeypatch.setattr(app, "PASSWORD", "")
+    assert anonyme.get("/").status_code == 503 and anonyme.post("/connexion", data={"mot_de_passe": ""}).status_code == 503
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_111_lecture_seule_aucun_fichier_ne_bouge(app, monkeypatch):
+    """En lecture seule : l'analyse et les propositions fonctionnent, mais aucun octet ni aucune date
+    de fichier ne change, quel que soit le geste demandé."""
+    dossier = app.SCAN_DIR / "2019" / "2019-07-14 Mariage"
+    dossier.mkdir(parents=True)
+    photo = dossier / "a.jpg"
+    Image.new("RGB", (30, 30), "blue").save(photo)
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-DateTimeOriginal=2010:01:01 10:00:00", str(photo)], check=True)
+    app.scan_worker()
+    it = next(i for i in app.STATE["items"] if i["name"] == "a.jpg")
+    assert it["status"] == "écart" and it["proposed"]
+    monkeypatch.setattr(app, "LECTURE_SEULE", True)
+    avant = _empreintes(app.SCAN_DIR)
+    client = app.app.test_client()
+    assert "Mode lecture seule" in client.get("/").get_data(as_text=True)
+    client.post("/apply", data={"sel": it["id"], f"date_{it['id']}": it["proposed"]})
+    assert client.get("/progress").get_json()["running"] is False
+    assert client.post("/renommer", json={"folder": "2019/2019-07-14 Mariage", "nouveau": "2010/2010-01-01 Autre"}).status_code == 409
+    client.post("/realigner")
+    for ecrire in (lambda: app.write_date(it, app.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: app.write_date_robust(it, app.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: app.convert_and_date(it, app.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: app.rename_to_real_ext(it, "png"), lambda: app.strip_jpeg_header(it),
+                   lambda: app.realign_worker([str(photo)])):
+        with pytest.raises(app.LectureSeule):
+            ecrire()
+    assert _empreintes(app.SCAN_DIR) == avant and dossier.is_dir()

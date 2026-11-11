@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.10.1"
+__version__ = "1.11.0"
 
 import calendar
 import shutil
@@ -51,7 +51,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, Response, abort, redirect, render_template_string, request, send_file, url_for
+import hmac
+import secrets
+from flask import Flask, Response, abort, redirect, render_template_string, request, send_file, session, url_for
 from PIL import Image, ImageOps
 
 try:
@@ -72,6 +74,9 @@ TZ = ZoneInfo(os.environ.get("TZ", "Europe/Paris"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 PORT = int(os.environ.get("PORT", "8099"))
 ORIGINALS_DIR = os.environ.get("ORIGINALS_DIR", "").strip()   # vide : originaux convertis supprimés
+# 1.11.0 : mot de passe commun aux applis (obligatoire) et mode lecture seule
+PASSWORD = os.environ.get("VERIF_PASSWORD", "")
+LECTURE_SEULE = os.environ.get("VERIF_LECTURE_SEULE", "").strip().lower() in ("oui", "1", "true", "yes")
 
 THUMBS = DATA_DIR / "thumbs"
 RESULTS_FILE = DATA_DIR / "results.json"
@@ -103,6 +108,100 @@ FMT = "%Y-%m-%d %H:%M:%S"
 
 app = Flask(__name__)
 LOCK = threading.Lock()
+
+
+# --------------------------------------------------------------------------- accès (1.11.0)
+class LectureSeule(RuntimeError):
+    """Écriture refusée : l'outil tourne en lecture seule (VERIF_LECTURE_SEULE)."""
+
+
+def exiger_ecriture():
+    """À appeler en tête de tout ce qui modifie, déplace ou supprime un fichier de la Pellicule."""
+    if LECTURE_SEULE:
+        raise LectureSeule("Mode lecture seule : aucun fichier n'est modifié.")
+
+
+def _cle_session() -> bytes:
+    """Clé qui signe le cookie de session, gardée dans DATA_DIR pour survivre aux redémarrages."""
+    f = DATA_DIR / "cle-session"
+    try:
+        if f.exists() and f.stat().st_size >= 32:
+            return f.read_bytes()
+        cle = secrets.token_bytes(48)
+        f.write_bytes(cle)
+        f.chmod(0o600)
+        return cle
+    except OSError:
+        return secrets.token_bytes(48)
+
+
+app.secret_key = _cle_session()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_NAME="verif_dates",
+                  PERMANENT_SESSION_LIFETIME=dt.timedelta(days=30))
+ECHECS = {"n": 0}     # mots de passe faux à la suite : chaque essai attend un peu plus
+
+PAGE_CONNEXION = """<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vérif dates Pellicule</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--bad:#b91c1c;--acc:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
+form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;width:min(22rem,calc(100vw - 2rem));display:grid;gap:10px}
+h1{font-size:18px;margin:0}p{margin:0;color:var(--mute);font-size:13px}.ko{color:var(--bad);font-weight:600}
+input{padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font-size:16px}
+button{border:0;border-radius:8px;padding:10px 14px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;font-size:15px}
+</style></head><body>
+<form method="post" action="{{ url_for('connexion') }}">
+  <h1>Vérification des dates</h1>
+  <p>Cet outil modifie les fichiers de la Pellicule.</p>
+  <label for="mdp">Mot de passe (celui de carnet)</label>
+  <input id="mdp" name="mot_de_passe" type="password" autocomplete="current-password" autofocus required>
+  {% if erreur %}<p class="ko" role="alert">{{ erreur }}</p>{% endif %}
+  <button>Se connecter</button>
+</form></body></html>"""
+
+
+@app.before_request
+def garde():
+    """Rien ne répond sans session, sauf la page du mot de passe et le contrôle de santé."""
+    if request.endpoint in ("connexion", "sante"):
+        return None
+    if not PASSWORD:
+        return "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).", 503
+    if session.get("ok"):
+        return None
+    if request.method == "GET" and request.endpoint == "index":
+        return redirect(url_for("connexion"))
+    return {"ok": False, "msg": "Connexion nécessaire."}, 401
+
+
+@app.get("/health")
+def sante():
+    return {"ok": True, "version": __version__}
+
+
+@app.route("/connexion", methods=["GET", "POST"])
+def connexion():
+    if not PASSWORD:
+        return "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).", 503
+    if request.method == "GET":
+        return redirect(url_for("index")) if session.get("ok") else render_template_string(PAGE_CONNEXION, erreur="")
+    time_sleep(min(5.0, 0.5 * ECHECS["n"]))
+    if hmac.compare_digest(request.form.get("mot_de_passe", "").encode(), PASSWORD.encode()):
+        ECHECS["n"] = 0
+        session.clear()
+        session["ok"] = True
+        session.permanent = True
+        return redirect(url_for("index"))
+    ECHECS["n"] += 1
+    return render_template_string(PAGE_CONNEXION, erreur="Mot de passe incorrect."), 401
+
+
+@app.post("/deconnexion")
+def deconnexion():
+    session.clear()
+    return redirect(url_for("connexion"))
 STATE = {
     "running": False,
     "progress": "",
@@ -466,6 +565,7 @@ def rename_to_real_ext(item, real: str):
     - fichier identique octet pour octet → le fichier mal nommé est mis de côté dans DOUBLONS_DIR
       et la date sera écrite sur le fichier déjà bien nommé ;
     - sinon → nom alternatif « nom-ancienneext.vraieext ». Retourne (nouveau chemin, note)."""
+    exiger_ecriture()
     src = Path(item["path"])
     dst = src.with_suffix("." + real)
     old_ext = src.suffix.lstrip(".").lower()
@@ -489,6 +589,7 @@ def rename_to_real_ext(item, real: str):
 def strip_jpeg_header(item):
     """JPEG précédé d'octets parasites : retire ce qui précède le marqueur de début d'image (FF D8 FF).
     Aucun pixel n'est modifié ; l'original est copié dans CLEANED_DIR. Retourne un message ou None."""
+    exiger_ecriture()
     src = Path(item["path"])
     data = src.read_bytes()
     pos = data.find(b"\xff\xd8\xff", 0, 65536)
@@ -515,6 +616,7 @@ def write_date_robust(item, nd: dt.datetime):
     """write_date + réparations sûres quand exiftool refuse le fichier :
     1. contenu d'un autre format que l'extension → renommage ; 2. octets parasites → nettoyage ;
     sinon le fichier est déclaré abîmé et n'est pas modifié."""
+    exiger_ecriture()
     notes = []
     real = item.get("vrai_ext") or ""
     if real:
@@ -992,6 +1094,7 @@ def remux_mp4(src: Path, dst: Path):
 
 def convert_and_date(item, nd: dt.datetime):
     """AVI/MTS/MKV → MP4 daté. L'original n'est supprimé qu'après vérification de la copie et de sa date."""
+    exiger_ecriture()
     src = Path(item["path"])
     final = src.with_suffix(".mp4")
     if final.exists():
@@ -1031,6 +1134,7 @@ def convert_and_date(item, nd: dt.datetime):
 
 
 def write_date(item, nd: dt.datetime):
+    exiger_ecriture()
     path = Path(item["path"])
     v = nd.strftime("%Y:%m:%d %H:%M:%S")
     off = tz_offset(nd)
@@ -1221,6 +1325,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
   {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·{% if state.stats.abime %} {{ state.stats.abime }} abîmé(s) ·{% endif %}
   {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}{% if state.stats and state.stats.valide %} · {{ state.stats.valide }} validée(s) telles quelles{% endif %}</span>
+  <form method="post" action="{{ url_for('deconnexion') }}" style="margin-left:auto"><button class="sec">Se déconnecter</button></form>
 </header>
 <main>
 <div id="prog" class="msg prog" {% if not state.running %}hidden{% endif %}>
@@ -1230,6 +1335,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   <ol id="prog-steps" class="steps"></ol>
   <div id="prog-total" class="prog-total"></div>
 </div>
+{% if lecture_seule %}<div class="msg realign" role="status"><strong>Mode lecture seule.</strong> L'outil analyse et propose des dates, mais ne modifie, ne déplace et ne supprime aucun fichier (VERIF_LECTURE_SEULE).</div>{% endif %}
 {% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
 {% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
 {% for m in messages %}<div class="msg">{{ m }}</div>{% endfor %}
@@ -1458,6 +1564,7 @@ def index():
                                   corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__,
                                   has_cache=CACHE_FILE.exists(), originals_dir=bool(ORIGINALS_DIR),
+                                  lecture_seule=LECTURE_SEULE,
                                   a_realigner=0 if state["running"] else len(videos_a_realigner()))
 
 
@@ -1541,6 +1648,8 @@ APPLY_THREAD = None
 @app.post("/apply")
 def apply():
     global APPLY_THREAD
+    if LECTURE_SEULE:
+        return redirect(url_for("index", m="Mode lecture seule : aucune photo n'a été corrigée."))
     jobs = []
     for item_id in request.form.getlist("sel"):
         item = ITEMS.get(item_id)
@@ -1647,6 +1756,7 @@ def dates_avec_fuseau(path, tags):
 
 
 def realign_worker(paths):
+    exiger_ecriture()
     faits = []
     try:
         faits = json.loads(REALIGNED_FILE.read_text(encoding="utf-8"))
@@ -1687,6 +1797,8 @@ def realign_worker(paths):
 
 @app.post("/realigner")
 def realigner():
+    if LECTURE_SEULE:
+        return redirect(url_for("index", m="Mode lecture seule : aucune vidéo n'a été modifiée."))
     paths = videos_a_realigner()
     with LOCK:
         if STATE["running"] or not paths:
@@ -1730,6 +1842,8 @@ def valider():
 @app.post("/renommer")
 def renommer():
     """Renomme (déplace) un dossier de la Pellicule, puis relance une analyse des nouveaux fichiers."""
+    if LECTURE_SEULE:
+        return {"ok": False, "msg": "mode lecture seule : le dossier n'a pas été renommé"}, 409
     data = request.get_json(silent=True) or {}
     folder, nouveau = data.get("folder", ""), (data.get("nouveau") or "").strip().strip("/")
     src = (SCAN_DIR / folder).resolve()
@@ -1805,6 +1919,8 @@ if __name__ == "__main__":
     load_results()
     load_corrected()
     load_validated()
+    if not PASSWORD:
+        raise SystemExit("Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).")
     if not SCAN_DIR.is_dir():
         print(f"ATTENTION : dossier introuvable {SCAN_DIR}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

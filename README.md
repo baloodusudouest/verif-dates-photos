@@ -54,6 +54,8 @@ Elle affiche aussi le temps restant au total.
     container_name: verif_dates_photos
     environment:
       - TZ=Europe/Paris
+      - VERIF_PASSWORD=${CARNET_PASSWORD}             # obligatoire : le mot de passe commun aux applis
+      - VERIF_LECTURE_SEULE=${VERIF_LECTURE_SEULE:-}  # « oui » : aucun fichier n'est modifié
       - LOCAL_ROOT=/photos
       - SCAN_SUBDIR=Pellicule
       - TOLERANCE_DAYS=1
@@ -72,6 +74,8 @@ Elle affiche aussi le temps restant au total.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
+| `VERIF_PASSWORD` | — (**obligatoire**) | Mot de passe de la page. Sans lui, l'outil ne démarre pas |
+| `VERIF_LECTURE_SEULE` | — | `oui` : l'outil analyse et propose, mais ne modifie, ne déplace et ne supprime aucun fichier |
 | `LOCAL_ROOT` | `/photos` | Dossier racine des photos dans le conteneur |
 | `SCAN_SUBDIR` | `Pellicule` | Sous-dossier à analyser |
 | `TOLERANCE_DAYS` | `1` | Écart toléré, en jours |
@@ -93,7 +97,11 @@ Si la relecture est refusée, lance un scan de la bibliothèque externe.
 
 Les fichiers sont **modifiés sur place**. Fais une sauvegarde avant le premier passage, puis garde `corrections.csv` : il contient l'ancienne et la nouvelle date de chaque fichier.
 
-La page n'a pas de mot de passe. Elle est à garder sur le réseau local ou Tailscale.
+Depuis la 1.11.0, la page demande un mot de passe (`VERIF_PASSWORD`) et rien ne répond sans session, sauf `/health`. Elle reste à garder sur le réseau local ou Tailscale.
+
+Le mode lecture seule (`VERIF_LECTURE_SEULE=oui`) sert au premier jour d'une nouvelle version : l'analyse et les propositions fonctionnent, toute écriture est refusée, jusque dans les fonctions qui touchent aux fichiers.
+
+Le retour à une version précédente ramène le code, pas les fichiers : une vidéo convertie dont l'original a été supprimé ne revient pas. Régler `ORIGINALS_DIR` pour garder les originaux.
 
 ## Développement
 
