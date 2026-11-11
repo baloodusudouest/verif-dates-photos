@@ -454,3 +454,20 @@ def test_xmp_nomme_jpg_signale_abime(app):
     app.scan_worker("tout")
     it = app.STATE["items"][0]
     assert it["status"] == "abîmé" and "XMP" in it["erreur"]
+
+
+@pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
+def test_realignement_video_autre_fuseau(app):
+    """Vidéo tournée à New York (UTC-4) : CreationDate et CreateDate réalignées désignent le même instant."""
+    dossier = app.SCAN_DIR / "2015" / "2015-10 - NEW YORK CITY!!!"
+    dossier.mkdir(parents=True)
+    v = dossier / "2015-10-14-0232200096.MOV"
+    _mov_moov_en_fin(v, "2015-10-14T02:32:20-0400")
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-api", "QuickTimeUTC",
+                    "-QuickTime:CreateDate=2015:10:14 02:32:20", str(v)], check=True)
+    with open(app.LOG_FILE, "w", encoding="utf-8", newline="") as f:
+        f.write("horodatage;fichier;ancienne_date;source;nouvelle_date;statut;detail\n")
+        f.write(f"2026-11-11T12:00:00;{v};;;14/10/2015 02:32:20;échec;relu 14/10/2015 02:32:20 (CreationDate)\n")
+    app.realign_worker(app.videos_a_realigner())
+    assert app.videos_a_realigner() == []
+    assert "1 vidéo(s) réalignée(s)" in app.STATE["messages"][0]

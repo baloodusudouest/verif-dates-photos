@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 import calendar
 import shutil
@@ -1621,6 +1621,31 @@ def videos_a_realigner():
     return liste
 
 
+def dates_avec_fuseau(path, tags):
+    """Dates lues avec leur fuseau horaire (datetime « aware ») : une CreationDate en heure de New York
+    et une CreateDate en heure de Paris peuvent désigner le même instant."""
+    cmd = ["exiftool", "-j", "-q", "-q", "-api", "QuickTimeUTC", "-d", "%Y-%m-%d %H:%M:%S%z",
+           *[f"-{t}" for t in tags], str(path)]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        rec = json.loads(p.stdout)[0]
+    except Exception:
+        return {}
+    out = {}
+    for t in tags:
+        v = rec.get(t)
+        if not isinstance(v, str):
+            continue
+        for fmt in ("%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+            try:
+                d = dt.datetime.strptime(v, fmt)
+                out[t] = d if d.tzinfo else d.replace(tzinfo=TZ)
+                break
+            except ValueError:
+                pass
+    return out
+
+
 def realign_worker(paths):
     faits = []
     try:
@@ -1637,9 +1662,8 @@ def realign_worker(paths):
             args = ["exiftool", "-overwrite_original", "-q", "-m", "-api", "QuickTimeUTC",
                     *[f"-QuickTime:{t}<CreationDate" for t in tags], "-FileModifyDate<CreationDate", p]
             r = subprocess.run(args, capture_output=True, text=True)
-            lu = run_exiftool(Path(p), False)
-            rec = lu[0] if lu else {}
-            a, b = parse_date(rec.get("CreationDate")), parse_date(rec.get("CreateDate"))
+            d = dates_avec_fuseau(p, ["CreationDate", "CreateDate"])
+            a, b = d.get("CreationDate"), d.get("CreateDate")
             if r.returncode == 0 and a and b and abs((a - b).total_seconds()) <= 60:
                 ok_n += 1
                 faits.append(p)
