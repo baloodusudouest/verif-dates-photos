@@ -293,3 +293,43 @@ def test_javascript_valide(app, tmp_path):
     f.write_text(js, encoding="utf-8")
     p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_fichiers_mal_nommes_ou_abimes(app):
+    dossier = app.SCAN_DIR / "2008" / "2008 - BURGER !!!"
+    dossier.mkdir(parents=True)
+    img = Image.new("RGB", (64, 64), "red")
+    img.save(dossier / "png.jpg", "PNG")                         # PNG nommé .jpg
+    img.save(dossier / "vrai.jpg")
+    jpeg = (dossier / "vrai.jpg").read_bytes()
+    (dossier / "vrai.jpg").unlink()
+    (dossier / "entete.jpg").write_bytes(b"XXXX" + jpeg)          # octets parasites avant le JPEG
+    (dossier / "tronque.jpg").write_bytes(jpeg[:120])            # JPEG coupé
+    (dossier / "bruit.jpg").write_bytes(bytes(range(256)) * 20)  # illisible
+
+    app.scan_worker("tout")
+    items = {i["name"]: i for i in app.STATE["items"]}
+    assert items["bruit.jpg"]["status"] == "abîmé" and app.STATE["stats"]["abime"] == 1
+    assert items["png.jpg"]["vrai_ext"] == "png"
+    html = app.app.test_client().get("/").get_data(as_text=True)
+    assert "Extension incorrecte : le contenu est un PNG" in html and "Fichiers abîmés (1)" in html
+    assert f'value="{items["bruit.jpg"]["id"]}"' not in html     # pas de case à cocher pour un fichier abîmé
+
+    nd = app.dt.datetime(2008, 8, 10, 12, 0)
+    ok, msg, notes = app.write_date_robust(items["png.jpg"], nd)
+    assert ok, msg
+    assert (dossier / "png.png").exists() and not (dossier / "png.jpg").exists()
+
+    it = items["entete.jpg"]
+    ok, msg, notes = app.write_date_robust(it, nd)
+    assert ok, msg
+    assert "4 octet(s) parasite(s)" in notes[0]
+    assert (dossier / "entete.jpg").read_bytes()[:3] == b"\xff\xd8\xff"
+    assert (app.CLEANED_DIR / "Pellicule" / "2008" / "2008 - BURGER !!!" / "entete.jpg").read_bytes()[:4] == b"XXXX"
+
+    it = items["tronque.jpg"]
+    avant = (dossier / "tronque.jpg").read_bytes()
+    ok, msg, notes = app.write_date_robust(it, nd)
+    assert not ok and it["status"] == "abîmé" and "fichier abîmé" in msg
+    assert (dossier / "tronque.jpg").read_bytes() == avant        # jamais modifié

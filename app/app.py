@@ -14,6 +14,9 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   sans perte, réencodage seulement si nécessaire), date écrite et vérifiée, puis original supprimé
   (ou déplacé dans ORIGINALS_DIR si défini)
 - Photos corrigées retirées de la liste « À traiter » et rangées dans « Déjà corrigées »
+- Fichiers dont le contenu ne correspond pas à l'extension (PNG nommé .jpg…) : renommés avec la bonne
+  extension avant correction ; JPEG précédés d'octets parasites : nettoyés sans perte (original gardé
+  dans DATA_DIR/originaux-nettoyes) ; fichiers illisibles : signalés « abîmé », jamais modifiés
 - Estimation du temps pour chaque étape (index Immich, recensement, analyse) et au total, à partir
   du nombre de photos dans Immich et des durées mesurées lors de l'analyse précédente
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
@@ -22,7 +25,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 import calendar
 import shutil
@@ -79,7 +82,12 @@ RAW_EXT = {"dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "pef", "srw"}
 ALL_EXT = PHOTO_EXT | VIDEO_EXT | RAW_EXT
 NEEDS_MP4 = {"avi", "mts", "m2ts", "mkv"}   # exiftool ne sait pas y écrire de date
 
-READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateDate", "-FileModifyDate"]
+READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateDate", "-FileModifyDate",
+             "-FileTypeExtension", "-Error", "-Warning"]
+# extensions équivalentes : pas d'alerte si le contenu est de l'une et le nom de l'autre
+EXT_EQUIV = [{"jpg", "jpeg"}, {"tif", "tiff"}, {"heic", "heif"}, {"mts", "m2ts"},
+             {"mov", "mp4", "m4v", "3gp", "qt"}]
+CLEANED_DIR = DATA_DIR / "originaux-nettoyes"   # JPEG d'origine avant retrait des octets parasites
 DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateDate"]
 FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -391,6 +399,87 @@ def set_progress(**kw):
         STATE.update(**kw)
 
 
+def same_ext(a: str, b: str) -> bool:
+    a, b = a.lower(), b.lower()
+    return a == b or any(a in g and b in g for g in EXT_EQUIV)
+
+
+def content_ext(path: Path) -> str:
+    """Extension correspondant au contenu réel du fichier (selon exiftool), '' si inconnu."""
+    p = subprocess.run(["exiftool", "-q", "-q", "-s3", "-FileTypeExtension", str(path)],
+                       capture_output=True, text=True)
+    return p.stdout.strip().lower()
+
+
+def rename_to_real_ext(item, real: str):
+    """Renomme le fichier avec l'extension de son vrai format (et ses sidecars). Retourne le nouveau chemin."""
+    src = Path(item["path"])
+    dst = src.with_suffix("." + real)
+    if dst.exists():
+        raise FileExistsError(f"{dst.name} existe déjà")
+    src.rename(dst)
+    for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
+        if sc.exists() and sc != dst.with_suffix(".xmp"):
+            sc.rename(Path(str(dst) + ".xmp"))
+    item.update(path=str(dst), name=dst.name, immich_id=None)
+    return dst
+
+
+def strip_jpeg_header(item):
+    """JPEG précédé d'octets parasites : retire ce qui précède le marqueur de début d'image (FF D8 FF).
+    Aucun pixel n'est modifié ; l'original est copié dans CLEANED_DIR. Retourne un message ou None."""
+    src = Path(item["path"])
+    data = src.read_bytes()
+    pos = data.find(b"\xff\xd8\xff", 0, 65536)
+    if pos <= 0:
+        return None
+    tmp = src.with_name(f".{src.stem}.nettoyage{src.suffix}")
+    tmp.write_bytes(data[pos:])
+    try:
+        with Image.open(tmp) as im:
+            im.verify()
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return None
+    backup = CLEANED_DIR / src.relative_to(LOCAL_ROOT)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, backup)
+    st = src.stat()
+    tmp.replace(src)
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return f"{pos} octet(s) parasite(s) retiré(s) avant l'image (original gardé dans {backup})"
+
+
+def write_date_robust(item, nd: dt.datetime):
+    """write_date + réparations sûres quand exiftool refuse le fichier :
+    1. contenu d'un autre format que l'extension → renommage ; 2. octets parasites → nettoyage ;
+    sinon le fichier est déclaré abîmé et n'est pas modifié."""
+    notes = []
+    real = item.get("vrai_ext") or ""
+    if real:
+        dst = rename_to_real_ext(item, real)
+        notes.append(f"renommé en {dst.name}")
+    ok, msg = write_date(item, nd)
+    if not ok and "Not a valid" in msg:
+        real = content_ext(Path(item["path"]))
+        cur = Path(item["path"]).suffix.lstrip(".")
+        if real and real in ALL_EXT and not same_ext(real, cur):
+            dst = rename_to_real_ext(item, real)
+            notes.append(f"renommé en {dst.name} (le contenu est un {real.upper()})")
+            ok, msg = write_date(item, nd)
+        elif cur.lower() in ("jpg", "jpeg"):
+            note = strip_jpeg_header(item)
+            if note:
+                notes.append(note)
+                ok, msg = write_date(item, nd)
+    if not ok and ("Not a valid" in msg or "Corrupted" in msg or "format error" in msg.lower()):
+        item.update(status="abîmé", erreur=msg)
+        return False, f"fichier abîmé, non modifié : {msg}", notes
+    if ok:
+        ok, msg = verify(item, nd)
+    return ok, msg, notes
+
+
 def pick_date(rec):
     for tag in DATE_PRIORITY:
         d = parse_date(rec.get(tag))
@@ -444,8 +533,14 @@ def analyse_record(rec, immich_idx, stats):
     nd, nd_time = name_date(path.name)
     name_ref = ("jour", nd.year, nd.month, nd.day) if nd else None
 
+    erreur = rec.get("Error") or ""
+    fte = (rec.get("FileTypeExtension") or "").lower()
+    vrai_ext = fte if (fte and fte in ALL_EXT and not same_ext(fte, path.suffix.lstrip("."))) else ""
+    if erreur and not fte:
+        # 0. Fichier illisible : signalé, jamais modifié
+        status, key, proposed, psrc = "abîmé", "abime", None, ""
     # 1. Le nom du fichier contredit le dossier : toujours à trancher
-    if nd and ref and gap_days(ref, nd) > TOLERANCE_DAYS:
+    elif nd and ref and gap_days(ref, nd) > TOLERANCE_DAYS:
         status, key, proposed = "à trancher", "a_trancher", None
     else:
         # 2. Référence de détection : le dossier, sinon la date du nom du fichier
@@ -494,6 +589,9 @@ def analyse_record(rec, immich_idx, stats):
         "immich_id": immich_id,
         "immich_date": (immich_date or "")[:16].replace("T", " "),
         "has_creationdate": "CreationDate" in rec,
+        "erreur": erreur,
+        "vrai_ext": vrai_ext,
+        "alerte": rec.get("Warning") or "",
         "proposed_base": proposed.strftime(fmt_in) if proposed else "",
         "proposed_src_base": psrc,
         "proposed": proposed.strftime(fmt_in) if proposed else "",
@@ -543,7 +641,7 @@ def apply_neighbors(items, voisins):
             choix = dt.datetime.combine(jour, t)
             it["choice_voisins"] = choix.strftime(fmt_in)
             # priorité : nom du fichier > voisines > dossier
-            if it["status"] != "à trancher" and it["proposed_src"] != "nom du fichier":
+            if it["status"] not in ("à trancher", "abîmé") and it["proposed_src"] != "nom du fichier":
                 it["proposed"], it["proposed_src"] = it["choice_voisins"], "autres photos du dossier"
 
 
@@ -593,7 +691,7 @@ def file_sig(path: Path):
 def scan_worker(mode="tout"):
     """mode « tout » : tout relire ; mode « nouveaux » : seuls les fichiers nouveaux ou modifiés."""
     try:
-        stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "sans_ref": 0}
+        stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "abime": 0, "sans_ref": 0}
         meta = load_meta()
         fichiers_prev = meta.get("files_total")
         estime = lambda n, cle: (n * meta[cle]) if (n and meta.get(cle) is not None) else None
@@ -922,7 +1020,7 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
 .card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
 .name{font-weight:600;word-break:break-all}.tag{display:inline-block;border-radius:5px;padding:1px 6px;font-size:12px;font-weight:600;color:#fff}
-.t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-trancher{background:#7c3aed}.mute{color:var(--mute)}
+.t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-abime{background:#57534e}.t-trancher{background:#7c3aed}.mute{color:var(--mute)}
 .t-ok{background:var(--ok)}.card.done{opacity:.9}.actions{display:flex;gap:8px;flex-wrap:wrap}
 .coh{font-size:12px;font-weight:600}.coh-ok{color:var(--ok)}.coh-ko{color:var(--warn)}
 .choix{display:flex;gap:6px;flex-wrap:wrap}.choix button{padding:4px 8px;font-size:12px}
@@ -962,6 +1060,8 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
     <option value="sans date">Sans date EXIF ({{ counts['sans date'] }})</option>
     <option value="à trancher">À trancher, nom ≠ dossier ({{ counts['à trancher'] }})</option>
     <option value="incoherent">Date proposée incohérente avec les voisines</option>
+    <option value="abîmé">Fichiers abîmés ({{ counts['abîmé'] }})</option>
+    <option value="extension">Extension incorrecte</option>
     <option value="corrigees">Déjà corrigées ({{ corrected|length }})</option>
   </select>
   {% endif %}
@@ -974,7 +1074,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   {% endif %}
   <span class="stats">
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
-  {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·
+  {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·{% if state.stats.abime %} {{ state.stats.abime }} abîmé(s) ·{% endif %}
   {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}</span>
 </header>
 <main>
@@ -995,19 +1095,23 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button></div>
   <div class="grid">
   {% for it in group %}
-    <div class="card" data-status="{{ it.status }}" data-convertir="{{ 1 if it.convertir else 0 }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
+    <div class="card" data-status="{{ it.status }}" data-ext="{{ 1 if it.vrai_ext else 0 }}" data-convertir="{{ 1 if it.convertir else 0 }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
       <img loading="lazy" src="{{ url_for('thumb', item_id=it.id) }}" alt="">
       <div class="body">
         <div class="name">{{ it.name }}</div>
-        <div><span class="tag {{ 't-sans' if it.status == 'sans date' else ('t-trancher' if it.status == 'à trancher' else 't-ecart') }}">{{ it.status }}</span>
+        <div><span class="tag {{ 't-sans' if it.status == 'sans date' else ('t-trancher' if it.status == 'à trancher' else ('t-abime' if it.status == 'abîmé' else 't-ecart')) }}">{{ it.status }}</span>
           <span class="mute">{{ it.kind }}{% if it.gap %} · {{ it.gap }} j d'écart{% endif %}</span></div>
         <div>Fichier : {{ it.date or '—' }} {% if it.source %}<span class="mute">({{ it.source }})</span>{% endif %}</div>
         {% if it.name_date %}<div>Nom du fichier : {{ it.name_date }}</div>{% endif %}
         {% if it.immich_date %}<div class="mute">Immich : {{ it.immich_date }}</div>{% endif %}
         <div class="mute">Voisines : {{ it.voisins.label if it.voisins else "pas assez d'autres photos datées dans le dossier" }}</div>
+        {% if it.status == 'abîmé' %}<div class="res-ko">Fichier illisible ({{ it.erreur }}) : rien ne sera modifié. À remplacer depuis une sauvegarde.</div>{% endif %}
+        {% if it.vrai_ext %}<div class="res-ko" style="font-weight:500">⚠ Extension incorrecte : le contenu est un {{ it.vrai_ext|upper }}. Le fichier sera renommé en .{{ it.vrai_ext }} avant d'écrire la date (Immich le verra comme un nouveau fichier).</div>{% endif %}
+        {% if it.alerte and it.status != 'abîmé' %}<div class="mute">exiftool : {{ it.alerte }}</div>{% endif %}
         {% if it.convertir %}<div class="res-ko" style="font-weight:500">⚠ Format où la date ne peut pas être écrite : la vidéo sera convertie en .mp4 (sans perte si possible), puis l'original {{ 'déplacé' if originals_dir else 'supprimé' }}. Immich la verra comme un nouveau fichier.</div>{% endif %}
         {% if it.deja %}<div class="res-ko">Déjà corrigée le {{ it.deja }}, écart toujours présent</div>{% endif %}
         {% if it.result and not it.result.ok %}<div class="res-ko">✗ échec — {{ it.result.msg }}</div>{% endif %}
+        {% if it.status != 'abîmé' %}
         {% if it.status == 'à trancher' or not it.proposed %}
         <div class="mute">Choisis la date à écrire :</div>
         <div class="choix">
@@ -1021,6 +1125,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
         <input type="datetime-local" step="1" name="date_{{ it.id }}" value="{{ it.proposed }}" oninput="coherence(this)">
         <div class="coh"></div>
         <label class="sel"><input type="checkbox" name="sel" value="{{ it.id }}"> Corriger</label>
+        {% endif %}
       </div>
     </div>
   {% endfor %}
@@ -1058,7 +1163,7 @@ function filtrer(){const f=document.getElementById('filtre').value,corr=f==='cor
   const rien=document.getElementById('rien');if(rien)rien.hidden=corr;
   document.querySelectorAll('.actions').forEach(a=>a.style.display=corr?'none':'');
   document.querySelectorAll('#f .card').forEach(c=>{
-    let show=f==='tous'||(f==='incoherent'?c.dataset.coh==='0':c.dataset.status===f);c.style.display=show?'':'none'});
+    let show=f==='tous'||(f==='incoherent'?c.dataset.coh==='0':f==='extension'?c.dataset.ext==='1':c.dataset.status===f);c.style.display=show?'':'none'});
   document.querySelectorAll('#f [data-folder]').forEach(h=>{const g=h.nextElementSibling;
   const any=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');h.style.display=g.style.display=any?'':'none'});
   try{localStorage.setItem('verif-filtre',f)}catch(e){}}
@@ -1136,7 +1241,7 @@ def index():
         groups.setdefault(it["folder"], []).append(it)
     for r in corrected:
         cgroups.setdefault(r["folder"], []).append(r)
-    counts = {k: sum(1 for it in pending if it["status"] == k) for k in ("écart", "sans date", "à trancher")}
+    counts = {k: sum(1 for it in pending if it["status"] == k) for k in ("écart", "sans date", "à trancher", "abîmé")}
     messages = request.args.getlist("m") + list(state.get("messages") or [])
     return render_template_string(PAGE, state=state, pending=pending, groups=list(groups.items()),
                                   corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
@@ -1177,10 +1282,15 @@ def apply_worker(jobs):
                     log_correction(item, nd, ok, msg)
                     if ok:
                         item.update(path=str(new_path), name=new_path.name, immich_id=None)
+                elif item.get("status") == "abîmé":
+                    ok, msg = False, "fichier abîmé : non modifié"
                 else:
-                    ok, msg = write_date(item, nd)
-                    if ok:
-                        ok, msg = verify(item, nd)
+                    try:
+                        ok, msg, notes = write_date_robust(item, nd)
+                    except OSError as exc:
+                        ok, msg, notes = False, f"renommage impossible : {exc}", []
+                    if notes:
+                        msg = " ; ".join(notes) + (" — " + msg if msg else "")
                     log_correction(item, nd, ok, msg)
                 item["result"] = {"ok": ok, "msg": msg}
                 THUMBS.joinpath(f"{item['id']}.jpg").unlink(missing_ok=True)
@@ -1191,7 +1301,8 @@ def apply_worker(jobs):
                             "folder": item["folder"], "kind": item["kind"], "immich_id": item.get("immich_id"),
                             "avant": item["date"] or "sans date", "source": item.get("source", ""),
                             "apres": nd.strftime("%d/%m/%Y %H:%M:%S"),
-                            "note": msg if msg.startswith("converti") else "",
+                            "note": msg.split(" — relu")[0] if (msg.startswith("converti") or msg.startswith("renommé")
+                                                               or "parasite" in msg) else "",
                             "quand": dt.datetime.now().strftime("%d/%m/%Y %H:%M")}
                     save_corrected()
                     ok_count += 1
