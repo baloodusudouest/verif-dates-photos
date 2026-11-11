@@ -25,7 +25,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 import calendar
 import shutil
@@ -87,7 +87,8 @@ READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateD
 # extensions équivalentes : pas d'alerte si le contenu est de l'une et le nom de l'autre
 EXT_EQUIV = [{"jpg", "jpeg"}, {"tif", "tiff"}, {"heic", "heif"}, {"mts", "m2ts"},
              {"mov", "mp4", "m4v", "3gp", "qt"}]
-CLEANED_DIR = DATA_DIR / "originaux-nettoyes"   # JPEG d'origine avant retrait des octets parasites
+CLEANED_DIR = DATA_DIR / "originaux-nettoyes"
+DOUBLONS_DIR = DATA_DIR / "doublons"   # fichiers mal nommés identiques à un fichier déjà présent   # JPEG d'origine avant retrait des octets parasites
 DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateDate"]
 FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -411,18 +412,58 @@ def content_ext(path: Path) -> str:
     return p.stdout.strip().lower()
 
 
+def same_content(a: Path, b: Path) -> bool:
+    if a.stat().st_size != b.stat().st_size:
+        return False
+    ha, hb = hashlib.sha256(), hashlib.sha256()
+    with a.open("rb") as fa, b.open("rb") as fb:
+        for chunk in iter(lambda: fa.read(1 << 20), b""):
+            ha.update(chunk)
+        for chunk in iter(lambda: fb.read(1 << 20), b""):
+            hb.update(chunk)
+    return ha.digest() == hb.digest()
+
+
+def free_path(p: Path) -> Path:
+    n = 2
+    cand = p
+    while cand.exists():
+        cand = p.with_name(f"{p.stem}-{n}{p.suffix}")
+        n += 1
+    return cand
+
+
+def move_sidecars(src: Path, dst: Path):
+    for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
+        if sc.exists():
+            target = Path(str(dst) + ".xmp")
+            if not target.exists():
+                sc.rename(target)
+
+
 def rename_to_real_ext(item, real: str):
-    """Renomme le fichier avec l'extension de son vrai format (et ses sidecars). Retourne le nouveau chemin."""
+    """Renomme le fichier avec l'extension de son vrai format. Si ce nom est déjà pris :
+    - fichier identique octet pour octet → le fichier mal nommé est mis de côté dans DOUBLONS_DIR
+      et la date sera écrite sur le fichier déjà bien nommé ;
+    - sinon → nom alternatif « nom-ancienneext.vraieext ». Retourne (nouveau chemin, note)."""
     src = Path(item["path"])
     dst = src.with_suffix("." + real)
+    old_ext = src.suffix.lstrip(".").lower()
+    if dst.exists() and same_content(src, dst):
+        cote = free_path(DOUBLONS_DIR / src.relative_to(LOCAL_ROOT))
+        cote.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(cote))
+        for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
+            if sc.exists() and sc != dst.with_suffix(".xmp"):
+                shutil.move(str(sc), str(free_path(Path(str(cote) + ".xmp"))))
+        item.update(path=str(dst), name=dst.name, immich_id=None)
+        return dst, f"doublon identique de {dst.name} : mis de côté dans {cote}, date écrite sur {dst.name}"
     if dst.exists():
-        raise FileExistsError(f"{dst.name} existe déjà")
+        dst = free_path(src.with_name(f"{src.stem}-{old_ext}.{real}"))
     src.rename(dst)
-    for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
-        if sc.exists() and sc != dst.with_suffix(".xmp"):
-            sc.rename(Path(str(dst) + ".xmp"))
+    move_sidecars(src, dst)
     item.update(path=str(dst), name=dst.name, immich_id=None)
-    return dst
+    return dst, f"renommé en {dst.name}"
 
 
 def strip_jpeg_header(item):
@@ -457,15 +498,15 @@ def write_date_robust(item, nd: dt.datetime):
     notes = []
     real = item.get("vrai_ext") or ""
     if real:
-        dst = rename_to_real_ext(item, real)
-        notes.append(f"renommé en {dst.name}")
+        dst, note = rename_to_real_ext(item, real)
+        notes.append(note)
     ok, msg = write_date(item, nd)
     if not ok and "Not a valid" in msg:
         real = content_ext(Path(item["path"]))
         cur = Path(item["path"]).suffix.lstrip(".")
         if real and real in ALL_EXT and not same_ext(real, cur):
-            dst = rename_to_real_ext(item, real)
-            notes.append(f"renommé en {dst.name} (le contenu est un {real.upper()})")
+            dst, note = rename_to_real_ext(item, real)
+            notes.append(f"{note} (le contenu est un {real.upper()})")
             ok, msg = write_date(item, nd)
         elif cur.lower() in ("jpg", "jpeg"):
             note = strip_jpeg_header(item)
@@ -1106,7 +1147,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
         {% if it.immich_date %}<div class="mute">Immich : {{ it.immich_date }}</div>{% endif %}
         <div class="mute">Voisines : {{ it.voisins.label if it.voisins else "pas assez d'autres photos datées dans le dossier" }}</div>
         {% if it.status == 'abîmé' %}<div class="res-ko">Fichier illisible ({{ it.erreur }}) : rien ne sera modifié. À remplacer depuis une sauvegarde.</div>{% endif %}
-        {% if it.vrai_ext %}<div class="res-ko" style="font-weight:500">⚠ Extension incorrecte : le contenu est un {{ it.vrai_ext|upper }}. Le fichier sera renommé en .{{ it.vrai_ext }} avant d'écrire la date (Immich le verra comme un nouveau fichier).</div>{% endif %}
+        {% if it.vrai_ext %}<div class="res-ko" style="font-weight:500">⚠ Extension incorrecte : le contenu est un {{ it.vrai_ext|upper }}. Le fichier sera renommé en .{{ it.vrai_ext }} avant d'écrire la date (Immich le verra comme un nouveau fichier). Si ce nom est déjà pris : nom alternatif, ou mise de côté si c'est un doublon identique.</div>{% endif %}
         {% if it.alerte and it.status != 'abîmé' %}<div class="mute">exiftool : {{ it.alerte }}</div>{% endif %}
         {% if it.convertir %}<div class="res-ko" style="font-weight:500">⚠ Format où la date ne peut pas être écrite : la vidéo sera convertie en .mp4 (sans perte si possible), puis l'original {{ 'déplacé' if originals_dir else 'supprimé' }}. Immich la verra comme un nouveau fichier.</div>{% endif %}
         {% if it.deja %}<div class="res-ko">Déjà corrigée le {{ it.deja }}, écart toujours présent</div>{% endif %}
@@ -1302,7 +1343,7 @@ def apply_worker(jobs):
                             "avant": item["date"] or "sans date", "source": item.get("source", ""),
                             "apres": nd.strftime("%d/%m/%Y %H:%M:%S"),
                             "note": msg.split(" — relu")[0] if (msg.startswith("converti") or msg.startswith("renommé")
-                                                               or "parasite" in msg) else "",
+                                                               or "parasite" in msg or msg.startswith("doublon")) else "",
                             "quand": dt.datetime.now().strftime("%d/%m/%Y %H:%M")}
                     save_corrected()
                     ok_count += 1

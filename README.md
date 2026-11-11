@@ -27,7 +27,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
    - vidéos **AVI, MTS/M2TS et MKV** : exiftool ne sait pas écrire de date dans ces formats. La vidéo est donc **convertie en MP4** : les flux sont copiés sans perte, l'audio n'est réencodé en AAC que si nécessaire, et la vidéo en H.264 en dernier recours. Le MP4 est d'abord écrit dans un fichier temporaire, où la date est inscrite puis vérifiée, tout comme la durée. Le fichier est ensuite renommé, et l'original est **supprimé**, ou déplacé dans `ORIGINALS_DIR` si cette variable est définie. Si une étape échoue, l'original reste intact. Immich verra le MP4 comme un nouveau fichier.
 
    - fichiers que exiftool refuse d'écrire :
-     - **contenu d'un autre format que l'extension** (par exemple un PNG nommé `.jpg`) : le fichier est renommé avec la bonne extension, puis daté ; Immich le verra comme un nouveau fichier ;
+     - **contenu d'un autre format que l'extension** (par exemple un PNG nommé `.jpg`) : le fichier est renommé avec la bonne extension, puis daté ; Immich le verra comme un nouveau fichier. Si ce nom est déjà pris, deux cas se présentent : un fichier **identique octet pour octet** est un doublon, il est mis de côté dans `/data/doublons` et la date est écrite sur le fichier déjà bien nommé ; sinon, le fichier prend un nom alternatif (`nom-heic.jpg`) ;
      - **JPEG précédé d'octets parasites** : ces octets sont retirés sans toucher à l'image, et l'original est gardé dans `/data/originaux-nettoyes` ;
      - **fichier abîmé** (illisible ou tronqué) : il est signalé « abîmé » et n'est jamais modifié. Un filtre permet de les retrouver pour les remplacer depuis une sauvegarde.
 

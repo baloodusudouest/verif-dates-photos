@@ -333,3 +333,28 @@ def test_fichiers_mal_nommes_ou_abimes(app):
     ok, msg, notes = app.write_date_robust(it, nd)
     assert not ok and it["status"] == "abîmé" and "fichier abîmé" in msg
     assert (dossier / "tronque.jpg").read_bytes() == avant        # jamais modifié
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_renommage_nom_deja_pris(app):
+    dossier = app.SCAN_DIR / "2011" / "2011-12-31 Réveillon"
+    dossier.mkdir(parents=True)
+    Image.new("RGB", (64, 64), "blue").save(dossier / "a.jpg")
+    (dossier / "a.heic").write_bytes((dossier / "a.jpg").read_bytes())      # doublon identique mal nommé
+    Image.new("RGB", (64, 64), "red").save(dossier / "b.jpg")
+    Image.new("RGB", (64, 64), "green").save(dossier / "b.heic", "JPEG")     # contenu différent, même nom
+    app.scan_worker("tout")
+    items = {i["name"]: i for i in app.STATE["items"]}
+    nd = app.dt.datetime(2011, 12, 31, 20, 0)
+
+    ok, msg, notes = app.write_date_robust(items["a.heic"], nd)
+    assert ok, msg
+    assert "doublon identique de a.jpg" in notes[0]
+    assert not (dossier / "a.heic").exists()
+    assert (app.DOUBLONS_DIR / "Pellicule" / "2011" / "2011-12-31 Réveillon" / "a.heic").exists()
+    assert items["a.heic"]["path"].endswith("a.jpg")
+
+    ok, msg, notes = app.write_date_robust(items["b.heic"], nd)
+    assert ok, msg
+    assert (dossier / "b-heic.jpg").exists() and (dossier / "b.jpg").exists()
+    assert notes[0] == "renommé en b-heic.jpg"
