@@ -29,7 +29,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 import calendar
 import shutil
@@ -1139,6 +1139,8 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .stats{color:var(--mute);font-size:13px}.msg{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:14px}
 .folder{margin:22px 0 8px;display:flex;flex-direction:column;gap:8px}.folder h2{font-size:15px;margin:0}
 .folder-titre{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.folder{scroll-margin-top:150px}.plier{padding:2px 9px;font-size:13px}.grid.replie{display:none!important}
+.folder.replie .folder-actions{display:none}.resume{font-size:13px;font-weight:600;color:var(--ok)}
 .folder-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
 .folder-actions button{padding:5px 10px;font-size:13px}.folder-actions .jour{display:inline-flex;gap:4px}
 .folder-actions input[type=date]{padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
@@ -1220,7 +1222,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 {% for folder, group in groups %}
   {% set modifiables = group|rejectattr('status', 'equalto', 'abîmé')|list %}
   <div class="folder" data-folder data-nom="{{ folder }}">
-    <div class="folder-titre"><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }} · {{ group|length }} photo(s)</span></div>
+    <div class="folder-titre"><button class="sec plier" type="button" onclick="plier(this)" aria-expanded="true" title="Replier ou déplier ce dossier">▾</button><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }} · {{ group|length }} photo(s)</span><span class="resume"></span></div>
     {% if modifiables %}
     <div class="folder-actions">
       <span class="mute">Tout le dossier :</span>
@@ -1319,7 +1321,17 @@ function appliquerDossier(btn,type){
     const v=type==='jour'?jour+'T'+(c.dataset.heure||'12:00:00'):c.dataset[k];
     if(!v){sautes++;return}
     inp.value=v;coherence(inp);b.checked=true;faits++});
-  info.textContent=faits+' photo(s) réglée(s) et cochée(s)'+(sautes?', '+sautes+' sans date de ce type (inchangées)':'')+' — vérifie puis « Corriger ce dossier ».'}
+  info.textContent=faits+' photo(s) réglée(s) et cochée(s)'+(sautes?', '+sautes+' sans date de ce type (inchangées)':'')+' — vérifie puis « Corriger ce dossier ».';
+  if(faits){replier(entete,'✓ '+faits+' photo(s) réglée(s) et cochée(s)'+(sautes?' · '+sautes+' inchangée(s)':''));suivant(entete)}}
+function replier(entete,texte){entete.classList.add('replie');entete.nextElementSibling.classList.add('replie');
+  const b=entete.querySelector('.plier');b.textContent='▸';b.setAttribute('aria-expanded','false');
+  entete.querySelector('.resume').textContent=texte||''}
+function deplier(entete){entete.classList.remove('replie');entete.nextElementSibling.classList.remove('replie');
+  const b=entete.querySelector('.plier');b.textContent='▾';b.setAttribute('aria-expanded','true');entete.querySelector('.resume').textContent=''}
+function plier(btn){const e=btn.closest('[data-folder]');e.classList.contains('replie')?deplier(e):replier(e,'replié')}
+function suivant(entete){const tous=[...document.querySelectorAll('#f [data-folder]')].filter(h=>h.style.display!=='none');
+  const prochain=tous.slice(tous.indexOf(entete)+1).find(h=>!h.classList.contains('replie'));
+  (prochain||entete).scrollIntoView({behavior:'smooth',block:'start'})}
 async function poster(url,corps){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(corps)});
   let j={};try{j=await r.json()}catch(e){}return [r.ok,j]}
 async function validerDossier(btn){const nom=btn.closest('[data-folder]').dataset.nom;
