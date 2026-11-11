@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 import calendar
 import shutil
@@ -142,7 +142,7 @@ ECHECS = {"n": 0}     # mots de passe faux à la suite : chaque essai attend un 
 
 PAGE_CONNEXION = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vérif dates Pellicule</title>
+<title>Éphéméride</title>
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--bad:#b91c1c;--acc:#2563eb}
 @media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
@@ -153,7 +153,7 @@ input{padding:9px;border:1px solid var(--line);border-radius:8px;background:var(
 button{border:0;border-radius:8px;padding:10px 14px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;font-size:15px}
 </style></head><body>
 <form method="post" action="{{ url_for('connexion') }}">
-  <h1>Vérification des dates</h1>
+  <h1>Éphéméride</h1>
   <p>Cet outil modifie les fichiers de la Pellicule.</p>
   <label for="mdp">Mot de passe (celui de carnet)</label>
   <input id="mdp" name="mot_de_passe" type="password" autocomplete="current-password" autofocus required>
@@ -1247,7 +1247,7 @@ def make_thumb(item, cache: Path):
 # --------------------------------------------------------------------------- pages
 PAGE = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vérif dates Pellicule</title>
+<title>Éphéméride</title>
 <style>
 /* 2.0.0 : habillage commun aux applis (celui de carnet) : fonds neutres chauds, sombre par défaut,
    clair quand l'appareil le demande. Couleur de l'outil : bleu ardoise. Les noms des variables et
@@ -1321,7 +1321,7 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 @media (max-width:899px){header{position:static}.folder{scroll-margin-top:12px}}
 </style></head><body>
 <nav class="rail" aria-label="Sections">
-  <span class="marque">Dates de la Pellicule</span>
+  <span class="marque">Éphéméride</span>
   <a href="#a-traiter" data-vue="a-traiter" aria-label="À traiter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 5.6A1.6 1.6 0 0 1 7.8 4.5h8.4a1.6 1.6 0 0 1 1.6 1.1L20 13.5"/><path d="M4 13.5V18a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 18v-4.5h-4.6l-1.2 2.2h-4.4l-1.2-2.2z"/></svg><span class="nom">À traiter</span>{% if pending %}<span class="pastille">{{ pending|length if pending|length < 1000 else '999+' }}</span>{% endif %}</a>
   <a href="#corrigees" data-vue="corrigees" aria-label="Corrigées"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.2 12.3 2.6 2.6 5-5.4"/></svg><span class="nom">Corrigées</span></a>
   <a href="#connexion" data-vue="connexion" aria-label="Connexion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.6"/><circle cx="5" cy="6" r="1.8"/><circle cx="19" cy="6" r="1.8"/><circle cx="5" cy="18" r="1.8"/><circle cx="19" cy="18" r="1.8"/><path d="m6.4 7.2 3.6 3M17.6 7.2l-3.6 3M6.4 16.8l3.6-3M17.6 16.8l-3.6-3"/></svg><span class="nom">Connexion</span></a>

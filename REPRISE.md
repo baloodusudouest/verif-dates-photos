@@ -1,4 +1,6 @@
-# Reprise — vérification des dates
+# Reprise — Éphéméride (vérification des dates)
+
+Nom d'appli depuis la 2.0.1 : **Éphéméride**. Noms techniques inchangés (`verif-dates-photos`, `VERIF_…`).
 
 Fichier à lire en premier dans une nouvelle session, et à mettre à jour à chaque fin de session, dans le même commit que le code.
 

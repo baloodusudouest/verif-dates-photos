@@ -1,4 +1,6 @@
-# verif-dates-photos
+# Éphéméride (verif-dates-photos)
+
+> Depuis la 2.0.1 l'appli s'appelle **Éphéméride**. Le dépôt, l'image, le conteneur et les variables gardent leur nom technique `verif-dates-photos` / `VERIF_…` : rien à changer dans la stack.
 
 > **Version 2.0.0** : même outil, mêmes règles, avec un mot de passe, un mode lecture seule et l'habillage commun aux autres applis (rail, tuiles, sections Connexion et Réglages). Voir `CHANGELOG.md`.
 

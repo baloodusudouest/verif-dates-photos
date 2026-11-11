@@ -1,5 +1,8 @@
 # Journal des versions
 
+## 2.0.1 — 12 novembre 2026
+- L'appli s'appelle maintenant **Éphéméride** (titre de la page, écran du mot de passe, rail). Rien d'autre ne change : le dépôt, l'image, le conteneur et les variables gardent leur nom technique.
+
 ## 2.0.0 — 11 novembre 2026
 L'outil prend l'habillage et la navigation communs aux applis, par la voie médiane retenue après le conseil : **le serveur, les adresses qui écrivent, les règles de dates et les fichiers d'état ne changent pas**. Seuls le style de la page et son organisation changent.
 - **Habillage commun** : fonds neutres chauds, sombre par défaut et clair quand l'appareil le demande, couleur **bleu ardoise**.
