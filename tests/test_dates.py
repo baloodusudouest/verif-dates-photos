@@ -140,3 +140,59 @@ def test_scan_nouveaux_et_tout(app):
     app.scan_worker("tout")
     assert sorted(lus) == ["a.jpg", "b.jpg", "c.jpg"]
     app.run_exiftool_files = origine
+
+
+def _exif(path, valeur):
+    subprocess.run(["exiftool", "-q", "-overwrite_original", f"-DateTimeOriginal={valeur}", str(path)], check=True)
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_voisines_et_deja_corrigees(app):
+    burger = app.SCAN_DIR / "2008" / "2008 - BURGER !!!"
+    burger.mkdir(parents=True)
+    img = Image.new("RGB", (8, 8), "green")
+    for n in ("v1.jpg", "v2.jpg", "v3.jpg", "v4.jpg", "faux.jpg", "vide.jpg", "2008-08-11-120000.jpg"):
+        img.save(burger / n)
+    for n in ("v1.jpg", "v2.jpg", "v3.jpg"):
+        _exif(burger / n, "2008:08:10 15:00:00")
+    _exif(burger / "v4.jpg", "2008:08:12 18:00:00")
+    _exif(burger / "faux.jpg", "2022:12:24 14:42:39")      # mauvaise date d'appareil
+    _exif(burger / "2008-08-11-120000.jpg", "2022:12:24 14:42:39")
+
+    app.scan_worker("tout")
+    items = {i["name"]: i for i in app.STATE["items"]}
+    assert set(items) == {"faux.jpg", "vide.jpg", "2008-08-11-120000.jpg"}
+
+    faux = items["faux.jpg"]                           # dossier « 2008 » seul → jour dominant des voisines
+    assert faux["proposed"] == "2008-08-10T14:42:39" and faux["proposed_src"] == "autres photos du dossier"
+    assert faux["voisins"]["min"] == "2008-08-10" and faux["voisins"]["max"] == "2008-08-12"
+    assert "3/4 photos" in faux["voisins"]["label"]
+    assert items["vide.jpg"]["proposed"] == "2008-08-10T12:00:00"
+    nom = items["2008-08-11-120000.jpg"]               # le nom du fichier reste prioritaire
+    assert nom["proposed"] == "2008-08-11T12:00:00" and nom["proposed_src"] == "nom du fichier"
+    assert nom["choice_voisins"] == "2008-08-10T14:42:39"
+
+    client = app.app.test_client()
+    html = client.get("/").get_data(as_text=True)
+    assert 'data-vmin="2008-08-10"' in html and "Déjà corrigées (0)" in html
+
+    client.post("/apply", data={"sel": faux["id"], f"date_{faux['id']}": faux["proposed"]})
+    app.APPLY_THREAD.join(timeout=60)
+    assert faux["result"]["ok"]
+    html = client.get("/").get_data(as_text=True)
+    assert "À traiter — tout (2)" in html and "Déjà corrigées (1)" in html
+    assert "Avant : 24/12/2022 14:42:39" in html and "10/08/2008 14:42:39" in html
+    assert client.get(f"/thumb/{faux['id']}").status_code == 200
+
+    # après un nouveau scan, la photo corrigée n'est plus signalée mais reste dans « Déjà corrigées »
+    app.scan_worker("nouveaux")
+    assert "faux.jpg" not in {i["name"] for i in app.STATE["items"]}
+    assert "Déjà corrigées (1)" in client.get("/").get_data(as_text=True)
+
+    # si l'écart revient, elle repasse « À traiter » avec la mention
+    _exif(burger / "faux.jpg", "2022:12:24 14:42:39")
+    app.scan_worker("nouveaux")
+    revenu = next(i for i in app.STATE["items"] if i["name"] == "faux.jpg")
+    assert revenu["deja"]
+    html = client.get("/").get_data(as_text=True)
+    assert "Déjà corrigées (0)" in html and "écart toujours présent" in html

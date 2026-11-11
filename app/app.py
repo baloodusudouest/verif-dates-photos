@@ -8,15 +8,19 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   elle devient la date proposée si elle concorde avec le dossier, sinon la photo est « à trancher »
 - Deux modes : « Scanner les nouveaux » (fichiers nouveaux ou modifiés depuis la dernière analyse,
   les autres sont repris du cache) et « Tout rescanner »
+- Cohérence avec les autres photos du dossier (« voisines ») : jour dominant proposé quand le nom
+  du fichier ne donne pas de date, et alerte si la date choisie sort de la période des voisines
+- Photos corrigées retirées de la liste « À traiter » et rangées dans « Déjà corrigées »
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
 - Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
 - Ne corrige QUE les fichiers cochés, puis relit le fichier pour vérifier l'écriture
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import calendar
+from collections import Counter
 import csv
 import datetime as dt
 import hashlib
@@ -54,6 +58,9 @@ PORT = int(os.environ.get("PORT", "8099"))
 THUMBS = DATA_DIR / "thumbs"
 RESULTS_FILE = DATA_DIR / "results.json"
 LOG_FILE = DATA_DIR / "corrections.csv"
+CORRECTED_FILE = DATA_DIR / "corrigees.json"   # photos corrigées (section « Déjà corrigées »)
+VOISINES_MIN = 2         # nombre minimal d'autres photos datées pour juger la cohérence
+VOISINES_PART = 0.5      # part minimale du jour dominant pour le proposer
 CACHE_FILE = DATA_DIR / "cache.json"   # résultat par fichier (taille + date de modification) pour le mode incrémental
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 THUMBS.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,7 @@ STATE = {
     "messages": [],     # messages à afficher à la fin d'une correction
 }
 ITEMS = {}
+CORRECTED = {}   # chemin → enregistrement de la correction
 
 
 # --------------------------------------------------------------------------- utilitaires
@@ -374,12 +382,14 @@ def analyse_record(rec, immich_idx, stats):
             return None
         status, key = ("sans date", "sans_date") if d is None else ("écart", "ecart")
         if nd:
-            proposed = propose_from_name(nd, nd_time, d)
+            proposed, psrc = propose_from_name(nd, nd_time, d), "nom du fichier"
         elif ref:
-            proposed = propose(ref, d)
+            proposed, psrc = propose(ref, d), "dossier"
         else:
-            proposed = dt.datetime.combine(dt.date.today(), dt.time(12, 0))
+            proposed, psrc = None, ""
     stats[key] += 1
+    if status == "à trancher":
+        psrc = ""
 
     immich_id, immich_date = None, None
     if immich_idx:
@@ -407,9 +417,69 @@ def analyse_record(rec, immich_idx, stats):
         "immich_id": immich_id,
         "immich_date": (immich_date or "")[:16].replace("T", " "),
         "has_creationdate": "CreationDate" in rec,
+        "proposed_base": proposed.strftime(fmt_in) if proposed else "",
+        "proposed_src_base": psrc,
         "proposed": proposed.strftime(fmt_in) if proposed else "",
+        "proposed_src": psrc,
         "result": None,
     }
+
+
+def neighbor_info(rec):
+    """(dossier, date EXIF ISO ou None, cohérente avec le dossier) : sert à juger les voisines."""
+    path = Path(rec["SourceFile"])
+    try:
+        rel = path.relative_to(SCAN_DIR)
+    except ValueError:
+        return None
+    ref = folder_ref(rel.parts[:-1])
+    d, _ = pick_date(rec)
+    coherent = bool(d) and (ref is None or gap_days(ref, d) <= TOLERANCE_DAYS)
+    return [str(rel.parent), d.strftime(FMT) if d else None, coherent]
+
+
+def apply_neighbors(items, voisins):
+    """Ajoute à chaque photo signalée la période de ses voisines et, à défaut de date dans le nom,
+    propose le jour dominant des voisines (heure d'origine conservée)."""
+    fmt_in = "%Y-%m-%dT%H:%M:%S"
+    for it in items:
+        it["proposed"], it["proposed_src"] = it.get("proposed_base", it["proposed"]), it.get("proposed_src_base", "")
+        it["voisins"], it["choice_voisins"] = None, ""
+        dates = sorted(dt.datetime.strptime(d, FMT) for p, d, ok in voisins.get(it["folder"], [])
+                       if ok and d and p != it["path"])
+        if len(dates) < VOISINES_MIN:
+            continue
+        jours = Counter(x.date() for x in dates)
+        jour, nb = jours.most_common(1)[0]
+        vmin, vmax = dates[0].date(), dates[-1].date()
+        if vmin == vmax:
+            label = f"toutes le {jour:%d/%m/%Y} ({len(dates)} photos)"
+        else:
+            label = f"{jour:%d/%m/%Y} pour {nb}/{len(dates)} photos · du {vmin:%d/%m/%Y} au {vmax:%d/%m/%Y}"
+        it["voisins"] = {"n": len(dates), "min": vmin.isoformat(), "max": vmax.isoformat(), "label": label}
+        if nb / len(dates) >= VOISINES_PART:
+            try:
+                t = dt.datetime.strptime(it["date"], "%d/%m/%Y %H:%M:%S").time() if it["date"] else dt.time(12)
+            except ValueError:
+                t = dt.time(12)
+            choix = dt.datetime.combine(jour, t)
+            it["choice_voisins"] = choix.strftime(fmt_in)
+            # priorité : nom du fichier > voisines > dossier
+            if it["status"] != "à trancher" and it["proposed_src"] != "nom du fichier":
+                it["proposed"], it["proposed_src"] = it["choice_voisins"], "autres photos du dossier"
+
+
+def load_corrected():
+    try:
+        CORRECTED.update(json.loads(CORRECTED_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+
+
+def save_corrected():
+    tmp = CORRECTED_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(CORRECTED, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(CORRECTED_FILE)
 
 
 def cache_params():
@@ -453,6 +523,7 @@ def scan_worker(mode="tout"):
         files = list_files()
         old_cache = load_cache() if mode == "nouveaux" else {}
         new_cache, items, to_scan, reused = {}, [], [], 0
+        voisins = {}   # dossier → [(chemin, date, cohérente)]
         for f in files:
             sig = file_sig(f)
             entry = old_cache.get(str(f))
@@ -469,6 +540,8 @@ def scan_worker(mode="tout"):
                         item["immich_id"], item["immich_date"] = (
                             (hit[0], (hit[1] or "")[:16].replace("T", " ")) if hit else (None, ""))
                     items.append(item)
+                if entry.get("v"):
+                    voisins.setdefault(entry["v"][0], []).append((str(f), entry["v"][1], entry["v"][2]))
                 new_cache[str(f)] = entry
             else:
                 to_scan.append(f)
@@ -486,12 +559,19 @@ def scan_worker(mode="tout"):
                 if item:
                     items.append(item)
                 path = Path(rec["SourceFile"])
+                v = neighbor_info(rec)
+                if v:
+                    voisins.setdefault(v[0], []).append((str(path), v[1], v[2]))
                 sig = file_sig(path)
                 if sig:
                     delta = {k: stats[k] - before[k] for k in stats if stats[k] != before[k]}
-                    new_cache[str(path)] = {"sig": sig, "stats": delta, "item": item}
+                    new_cache[str(path)] = {"sig": sig, "stats": delta, "item": item, "v": v}
             set_progress(done=i + len(chunk))
 
+        apply_neighbors(items, voisins)
+        for it in items:   # photo déjà corrigée mais toujours en écart : signalée à nouveau
+            rec = CORRECTED.get(it["path"])
+            it["deja"] = rec["quand"] if rec else ""
         items.sort(key=lambda it: (it["folder"], it["name"]))
         with LOCK:
             STATE.update(items=items, stats=stats, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -653,6 +733,8 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
 .name{font-weight:600;word-break:break-all}.tag{display:inline-block;border-radius:5px;padding:1px 6px;font-size:12px;font-weight:600;color:#fff}
 .t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-trancher{background:#7c3aed}.mute{color:var(--mute)}
+.t-ok{background:var(--ok)}.card.done{opacity:.9}.actions{display:flex;gap:8px;flex-wrap:wrap}
+.coh{font-size:12px;font-weight:600}.coh-ok{color:var(--ok)}.coh-ko{color:var(--warn)}
 .choix{display:flex;gap:6px;flex-wrap:wrap}.choix button{padding:4px 8px;font-size:12px}
 input[type=datetime-local]{width:100%;padding:5px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px}
@@ -678,20 +760,27 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
     <button name="mode" value="tout">Lancer l'analyse</button>
   {% endif %}
   </form>
-  {% if items %}
+  {% if pending or corrected %}
   <select id="filtre" onchange="filtrer()">
-    <option value="tous">Tout afficher</option><option value="écart">Écarts de date</option>
-    <option value="sans date">Sans date EXIF</option><option value="à trancher">À trancher (nom ≠ dossier)</option>
-    <option value="restant">Non corrigés</option>
+    <option value="tous">À traiter — tout ({{ pending|length }})</option>
+    <option value="écart">Écarts de date ({{ counts['écart'] }})</option>
+    <option value="sans date">Sans date EXIF ({{ counts['sans date'] }})</option>
+    <option value="à trancher">À trancher, nom ≠ dossier ({{ counts['à trancher'] }})</option>
+    <option value="incoherent">Date proposée incohérente avec les voisines</option>
+    <option value="corrigees">Déjà corrigées ({{ corrected|length }})</option>
   </select>
+  {% endif %}
+  {% if pending %}
+  <span class="actions">
   <button class="sec" type="button" onclick="cocher(true)">Tout cocher (visible)</button>
   <button class="sec" type="button" onclick="cocher(false)">Tout décocher</button>
   <button form="f" onclick="return confirmer()" {% if state.running %}disabled{% endif %}>Corriger la sélection</button>
+  </span>
   {% endif %}
   <span class="stats">
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
   {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·
-  {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}</span>
+  {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}</span>
 </header>
 <main>
 <div id="prog" class="msg prog" {% if not state.running %}hidden{% endif %}>
@@ -702,14 +791,14 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 {% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
 {% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
 {% for m in messages %}<div class="msg">{{ m }}</div>{% endfor %}
-{% if not items and state.scanned_at and not state.running %}<div class="msg res-ok">Aucun écart trouvé.</div>{% endif %}
+{% if not pending and state.scanned_at and not state.running %}<div class="msg res-ok" id="rien">Aucune photo à traiter.</div>{% endif %}
 <form id="f" method="post" action="{{ url_for('apply') }}">
 {% for folder, group in groups %}
   <div class="folder" data-folder><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }}</span>
   <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button></div>
   <div class="grid">
   {% for it in group %}
-    <div class="card" data-status="{{ it.status }}" data-done="{{ 1 if it.result and it.result.ok else 0 }}">
+    <div class="card" data-status="{{ it.status }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
       <img loading="lazy" src="{{ url_for('thumb', item_id=it.id) }}" alt="">
       <div class="body">
         <div class="name">{{ it.name }}</div>
@@ -718,39 +807,75 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
         <div>Fichier : {{ it.date or '—' }} {% if it.source %}<span class="mute">({{ it.source }})</span>{% endif %}</div>
         {% if it.name_date %}<div>Nom du fichier : {{ it.name_date }}</div>{% endif %}
         {% if it.immich_date %}<div class="mute">Immich : {{ it.immich_date }}</div>{% endif %}
-        {% if it.result %}
-          <div class="{{ 'res-ok' if it.result.ok else 'res-ko' }}">{{ '✓ corrigé' if it.result.ok else '✗ échec' }} — {{ it.result.msg }}</div>
+        <div class="mute">Voisines : {{ it.voisins.label if it.voisins else "pas assez d'autres photos datées dans le dossier" }}</div>
+        {% if it.deja %}<div class="res-ko">Déjà corrigée le {{ it.deja }}, écart toujours présent</div>{% endif %}
+        {% if it.result and not it.result.ok %}<div class="res-ko">✗ échec — {{ it.result.msg }}</div>{% endif %}
+        {% if it.status == 'à trancher' or not it.proposed %}
+        <div class="mute">Choisis la date à écrire :</div>
+        <div class="choix">
+          {% if it.choice_folder %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_folder }}')">Dossier ({{ it.ref }})</button>{% endif %}
+          {% if it.choice_name %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_name }}')">Nom ({{ it.name_date[:10] }})</button>{% endif %}
+          {% if it.choice_voisins %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_voisins }}')">Voisines ({{ it.choice_voisins[8:10] }}/{{ it.choice_voisins[5:7] }}/{{ it.choice_voisins[:4] }})</button>{% endif %}
+        </div>
         {% else %}
-          {% if it.status == 'à trancher' %}
-          <div class="mute">Choisis la date à écrire :</div>
-          <div class="choix">
-            {% if it.choice_folder %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_folder }}')">Dossier ({{ it.ref }})</button>{% endif %}
-            {% if it.choice_name %}<button class="sec" type="button" onclick="choisir(this,'{{ it.choice_name }}')">Nom ({{ it.name_date[:10] }})</button>{% endif %}
-          </div>
-          {% else %}
-          <div class="mute">Date proposée :</div>
-          {% endif %}
-          <input type="datetime-local" step="1" name="date_{{ it.id }}" value="{{ it.proposed }}">
-          <label class="sel"><input type="checkbox" name="sel" value="{{ it.id }}"> Corriger</label>
+        <div class="mute">Date proposée ({{ it.proposed_src }}) :</div>
         {% endif %}
+        <input type="datetime-local" step="1" name="date_{{ it.id }}" value="{{ it.proposed }}" oninput="coherence(this)">
+        <div class="coh"></div>
+        <label class="sel"><input type="checkbox" name="sel" value="{{ it.id }}"> Corriger</label>
       </div>
     </div>
   {% endfor %}
   </div>
 {% endfor %}
 </form>
+<section id="corrigees" hidden>
+{% if not corrected %}<div class="msg mute">Aucune photo corrigée pour l'instant.</div>{% endif %}
+{% for folder, group in cgroups %}
+  <div class="folder"><h2>{{ folder }}</h2><span class="mute">{{ group|length }} corrigée(s)</span></div>
+  <div class="grid">
+  {% for r in group %}
+    <div class="card done">
+      <img loading="lazy" src="{{ url_for('thumb', item_id=r.id) }}" alt="">
+      <div class="body">
+        <div class="name">{{ r.name }}</div>
+        <div><span class="tag t-ok">corrigée</span> <span class="mute">{{ r.kind }} · le {{ r.quand }}</span></div>
+        <div class="mute">Avant : {{ r.avant }}</div>
+        <div>Après : <strong>{{ r.apres }}</strong></div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+{% endfor %}
+</section>
 </main>
 <script>
 function visibles(){return [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none')}
 function cocher(v){visibles().forEach(c=>{const b=c.querySelector('input[type=checkbox]');if(b)b.checked=v})}
 function cocherDossier(btn){let g=btn.parentElement.nextElementSibling;g.querySelectorAll('.card').forEach(c=>{
   if(c.style.display==='none')return;const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true})}
-function filtrer(){const f=document.getElementById('filtre').value;document.querySelectorAll('.card').forEach(c=>{
-  let show=f==='tous'||(f==='restant'?c.dataset.done==='0':c.dataset.status===f);c.style.display=show?'':'none'});
-  document.querySelectorAll('[data-folder]').forEach(h=>{const g=h.nextElementSibling;
-  const any=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');h.style.display=g.style.display=any?'':'none'})}
-function choisir(btn,v){const c=btn.closest('.body');c.querySelector('input[type=datetime-local]').value=v;
+function filtrer(){const f=document.getElementById('filtre').value,corr=f==='corrigees';
+  document.getElementById('corrigees').hidden=!corr;document.getElementById('f').hidden=corr;
+  const rien=document.getElementById('rien');if(rien)rien.hidden=corr;
+  document.querySelectorAll('.actions').forEach(a=>a.style.display=corr?'none':'');
+  document.querySelectorAll('#f .card').forEach(c=>{
+    let show=f==='tous'||(f==='incoherent'?c.dataset.coh==='0':c.dataset.status===f);c.style.display=show?'':'none'});
+  document.querySelectorAll('#f [data-folder]').forEach(h=>{const g=h.nextElementSibling;
+  const any=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');h.style.display=g.style.display=any?'':'none'});
+  try{localStorage.setItem('verif-filtre',f)}catch(e){}}
+const TOL={{ tol }},JOUR=86400000;
+function fr(iso){return iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4)}
+function coherence(inp){const c=inp.closest('.card'),out=c.querySelector('.coh');if(!out)return;
+  if(!c.dataset.vmin||!inp.value){out.textContent='';out.className='coh';delete c.dataset.coh;return}
+  const d=Date.parse(inp.value.slice(0,10)+'T00:00:00Z'),a=Date.parse(c.dataset.vmin+'T00:00:00Z'),b=Date.parse(c.dataset.vmax+'T00:00:00Z');
+  const ok=d>=a-TOL*JOUR&&d<=b+TOL*JOUR;c.dataset.coh=ok?'1':'0';out.className='coh '+(ok?'coh-ok':'coh-ko');
+  out.textContent=ok?'✓ cohérente avec les autres photos du dossier'
+    :'⚠ hors de la période des autres photos ('+(c.dataset.vmin===c.dataset.vmax?fr(c.dataset.vmin):fr(c.dataset.vmin)+' – '+fr(c.dataset.vmax))+')'}
+document.querySelectorAll('#f input[type=datetime-local]').forEach(coherence);
+function choisir(btn,v){const c=btn.closest('.body'),inp=c.querySelector('input[type=datetime-local]');inp.value=v;coherence(inp);
   const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true}
+try{const f0=localStorage.getItem('verif-filtre'),sel=document.getElementById('filtre');
+  if(f0&&sel&&f0!=='corrigees'&&[...sel.options].some(o=>o.value===f0)){sel.value=f0;filtrer()}}catch(e){}
 function duree(s){if(s==null)return'';if(s<60)return'≈ '+s+' s restantes';
   const m=Math.round(s/60);return m<60?'≈ '+m+' min restantes':'≈ '+Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' restantes'}
 let wasRunning={{ 'true' if state.running else 'false' }};
@@ -774,6 +899,8 @@ function confirmer(){
   const vides=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
   if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked').length;
   if(!n){alert('Aucun fichier coché.');return false}
+  const ko=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.coh==='0').length;
+  if(ko&&!confirm(ko+' photo(s) cochée(s) ont une date hors de la période des autres photos du dossier. Continuer quand même ?'))return false;
   return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original). Continuer ?')}
 </script>
 </body></html>"""
@@ -784,11 +911,20 @@ def index():
     with LOCK:
         items = list(STATE["items"])
         state = dict(STATE)
-    groups = {}
-    for it in items:
+        corrected_all = list(CORRECTED.values())
+    pending = [it for it in items if not (it.get("result") or {}).get("ok")]
+    pending_paths = {it["path"] for it in pending}
+    corrected = sorted((r for r in corrected_all if r["path"] not in pending_paths),
+                       key=lambda r: (r["folder"], r["name"]))
+    groups, cgroups = {}, {}
+    for it in pending:
         groups.setdefault(it["folder"], []).append(it)
+    for r in corrected:
+        cgroups.setdefault(r["folder"], []).append(r)
+    counts = {k: sum(1 for it in pending if it["status"] == k) for k in ("écart", "sans date", "à trancher")}
     messages = request.args.getlist("m") + list(state.get("messages") or [])
-    return render_template_string(PAGE, state=state, items=items, groups=list(groups.items()),
+    return render_template_string(PAGE, state=state, pending=pending, groups=list(groups.items()),
+                                  corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__,
                                   has_cache=CACHE_FILE.exists())
 
@@ -827,6 +963,14 @@ def apply_worker(jobs):
                 item["result"] = {"ok": ok, "msg": msg}
                 THUMBS.joinpath(f"{item['id']}.jpg").unlink(missing_ok=True)
                 if ok:
+                    with LOCK:
+                        CORRECTED[item["path"]] = {
+                            "id": item["id"], "path": item["path"], "name": item["name"],
+                            "folder": item["folder"], "kind": item["kind"], "immich_id": item.get("immich_id"),
+                            "avant": item["date"] or "sans date", "source": item.get("source", ""),
+                            "apres": nd.strftime("%d/%m/%Y %H:%M:%S"),
+                            "quand": dt.datetime.now().strftime("%d/%m/%Y %H:%M")}
+                    save_corrected()
                     ok_count += 1
                     if item.get("immich_id"):
                         refresh.append(item["immich_id"])
@@ -889,7 +1033,9 @@ def progress():
 
 @app.get("/thumb/<item_id>")
 def thumb(item_id):
-    item = ITEMS.get(item_id) or abort(404)
+    item = ITEMS.get(item_id) or next((r for r in list(CORRECTED.values()) if r["id"] == item_id), None)
+    if item is None:
+        abort(404)
     cache = THUMBS / f"{item_id}.jpg"
     if not cache.exists():
         make_thumb(item, cache)
@@ -907,6 +1053,7 @@ def journal():
 
 if __name__ == "__main__":
     load_results()
+    load_corrected()
     if not SCAN_DIR.is_dir():
         print(f"ATTENTION : dossier introuvable {SCAN_DIR}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

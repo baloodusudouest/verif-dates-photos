@@ -12,17 +12,21 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
    - les **écarts** de plus de `TOLERANCE_DAYS` jours avec le dossier, ou avec le nom du fichier quand le dossier n'est pas daté ;
    - les photos **sans date EXIF** ;
    - les photos **à trancher**, quand le nom du fichier contredit le dossier.
-3. **Propose** une date pour chaque photo signalée :
+3. **Propose** une date pour chaque photo signalée, dans cet ordre de priorité :
    - la date du nom du fichier, avec son heure si elle y figure ;
-   - sinon la date du dossier, avec l'heure d'origine (12:00 si la photo n'a pas d'heure).
-   Pour une photo à trancher, aucune date n'est proposée d'office : deux boutons te laissent choisir entre celle du dossier et celle du nom.
-4. **Corrige uniquement les photos cochées**. La date est écrite dans le fichier, sans laisser de copie `_original`. Selon le type de fichier :
+   - sinon le **jour dominant des autres photos du dossier** (les « voisines » : photos du même dossier dont la date est cohérente), quand il regroupe au moins la moitié d'entre elles ;
+   - sinon la date du dossier.
+
+   L'heure d'origine est conservée, ou 12:00 si la photo n'a pas d'heure. Pour une photo à trancher, rien n'est proposé d'office : des boutons Dossier / Nom / Voisines te laissent choisir.
+4. **Contrôle la cohérence** : chaque carte indique si la date choisie tombe dans la période des voisines (± tolérance). Une alerte ⚠ s'affiche sinon, un filtre regroupe ces photos, et une confirmation est demandée avant de les corriger.
+5. **Corrige uniquement les photos cochées**. La date est écrite dans le fichier, sans laisser de copie `_original`. Selon le type de fichier :
    - photos : EXIF et décalage horaire ;
    - vidéos : dates QuickTime ;
    - dans tous les cas : sidecar `.xmp` s'il existe, et date de modification du fichier.
 
    Ensuite, la page **relit** le fichier pour vérifier l'écriture, et inscrit chaque correction dans `/data/corrections.csv`.
-5. **Immich (facultatif)** : la page affiche la date connue d'Immich et ses miniatures. Après correction, elle lui demande de relire les métadonnées.
+6. **Range les photos corrigées** dans la vue « Déjà corrigées » (avant → après), hors de la liste à traiter. Si un nouveau scan trouve encore un écart sur une photo corrigée, elle revient dans « À traiter » avec la mention « Déjà corrigée le … ».
+7. **Immich (facultatif)** : la page affiche la date connue d'Immich et ses miniatures. Après correction, elle lui demande de relire les métadonnées.
 
 ## Installation (Portainer)
 
@@ -54,7 +58,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
 | `SCAN_SUBDIR` | `Pellicule` | Sous-dossier à analyser |
 | `TOLERANCE_DAYS` | `1` | Écart toléré, en jours |
 | `IMMICH_URL`, `IMMICH_API_KEY`, `IMMICH_ROOT` | — | Accès à Immich (facultatif) |
-| `DATA_DIR` | `/data` | Résultats, miniatures, journal des corrections |
+| `DATA_DIR` | `/data` | Résultats, cache, miniatures, journal des corrections, photos corrigées |
 | `PORT` | `8099` | Port de la page |
 
 ### Permissions de la clé API Immich
