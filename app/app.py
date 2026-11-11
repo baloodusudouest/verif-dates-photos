@@ -17,6 +17,8 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Fichiers dont le contenu ne correspond pas à l'extension (PNG nommé .jpg…) : renommés avec la bonne
   extension avant correction ; JPEG précédés d'octets parasites : nettoyés sans perte (original gardé
   dans DATA_DIR/originaux-nettoyes) ; fichiers illisibles : signalés « abîmé », jamais modifiés
+- Actions par dossier : appliquer d'un coup la date du nom, des voisines, du dossier, la date proposée
+  ou un même jour à toutes les photos du dossier, puis « Corriger ce dossier »
 - Estimation du temps pour chaque étape (index Immich, recensement, analyse) et au total, à partir
   du nombre de photos dans Immich et des durées mesurées lors de l'analyse précédente
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
@@ -25,7 +27,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 import calendar
 import shutil
@@ -1056,7 +1058,12 @@ h1{font-size:18px;margin:0 12px 0 0}main{padding:16px;max-width:1400px;margin:au
 button,.btn{border:0;border-radius:8px;padding:8px 14px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;text-decoration:none}
 button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .stats{color:var(--mute);font-size:13px}.msg{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:14px}
-.folder{margin:22px 0 8px;display:flex;gap:10px;align-items:center}.folder h2{font-size:15px;margin:0}
+.folder{margin:22px 0 8px;display:flex;flex-direction:column;gap:8px}.folder h2{font-size:15px;margin:0}
+.folder-titre{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.folder-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.folder-actions button{padding:5px 10px;font-size:13px}.folder-actions .jour{display:inline-flex;gap:4px}
+.folder-actions input[type=date]{padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+.dossier-info{font-size:12px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
 .card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
@@ -1132,11 +1139,27 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 {% if not pending and state.scanned_at and not state.running %}<div class="msg res-ok" id="rien">Aucune photo à traiter.</div>{% endif %}
 <form id="f" method="post" action="{{ url_for('apply') }}">
 {% for folder, group in groups %}
-  <div class="folder" data-folder><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }}</span>
-  <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button></div>
+  {% set modifiables = group|rejectattr('status', 'equalto', 'abîmé')|list %}
+  <div class="folder" data-folder>
+    <div class="folder-titre"><h2>{{ folder }}</h2><span class="mute">dossier : {{ group[0].ref }} · {{ group|length }} photo(s)</span></div>
+    {% if modifiables %}
+    <div class="folder-actions">
+      <span class="mute">Tout le dossier :</span>
+      {% if modifiables|selectattr('choice_name')|list %}<button class="sec" type="button" onclick="appliquerDossier(this,'name')">Date du nom ({{ modifiables|selectattr('choice_name')|list|length }})</button>{% endif %}
+      {% if modifiables|selectattr('choice_voisins')|list %}<button class="sec" type="button" onclick="appliquerDossier(this,'voisins')">Voisines ({{ modifiables|selectattr('choice_voisins')|list|length }})</button>{% endif %}
+      {% if modifiables|selectattr('choice_folder')|list %}<button class="sec" type="button" onclick="appliquerDossier(this,'folder')">Date du dossier ({{ modifiables|selectattr('choice_folder')|list|length }})</button>{% endif %}
+      {% if modifiables|selectattr('proposed')|list %}<button class="sec" type="button" onclick="appliquerDossier(this,'proposed')">Dates proposées ({{ modifiables|selectattr('proposed')|list|length }})</button>{% endif %}
+      <span class="jour"><input type="date" class="dossier-jour" aria-label="Même jour pour tout le dossier"><button class="sec" type="button" onclick="appliquerDossier(this,'jour')">Même jour pour toutes</button></span>
+      <button class="sec" type="button" onclick="cocherDossier(this)">Cocher le dossier</button>
+      <button type="button" onclick="corrigerDossier(this)">Corriger ce dossier</button>
+      <span class="dossier-info mute"></span>
+    </div>
+    {% endif %}
+  </div>
   <div class="grid">
   {% for it in group %}
-    <div class="card" data-status="{{ it.status }}" data-ext="{{ 1 if it.vrai_ext else 0 }}" data-convertir="{{ 1 if it.convertir else 0 }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
+    <div class="card" data-status="{{ it.status }}" data-c-name="{{ it.choice_name }}" data-c-voisins="{{ it.choice_voisins }}"
+         data-c-folder="{{ it.choice_folder }}" data-c-proposed="{{ it.proposed }}" data-heure="{{ it.date[11:19] if it.date else '12:00:00' }}" data-ext="{{ 1 if it.vrai_ext else 0 }}" data-convertir="{{ 1 if it.convertir else 0 }}"{% if it.voisins %} data-vmin="{{ it.voisins.min }}" data-vmax="{{ it.voisins.max }}"{% endif %}>
       <img loading="lazy" src="{{ url_for('thumb', item_id=it.id) }}" alt="">
       <div class="body">
         <div class="name">{{ it.name }}</div>
@@ -1197,8 +1220,26 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 <script>
 function visibles(){return [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none')}
 function cocher(v){visibles().forEach(c=>{const b=c.querySelector('input[type=checkbox]');if(b)b.checked=v})}
-function cocherDossier(btn){let g=btn.parentElement.nextElementSibling;g.querySelectorAll('.card').forEach(c=>{
+function grilleDe(btn){return btn.closest('[data-folder]').nextElementSibling}
+function cocherDossier(btn){grilleDe(btn).querySelectorAll('.card').forEach(c=>{
   if(c.style.display==='none')return;const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true})}
+function appliquerDossier(btn,type){
+  const entete=btn.closest('[data-folder]'),info=entete.querySelector('.dossier-info');let jour='';
+  if(type==='jour'){jour=entete.querySelector('.dossier-jour').value;if(!jour){alert('Choisis d\u2019abord le jour.');return}}
+  let faits=0,sautes=0;
+  grilleDe(btn).querySelectorAll('.card').forEach(c=>{
+    if(c.style.display==='none')return;
+    const inp=c.querySelector('input[type=datetime-local]'),b=c.querySelector('input[name=sel]');if(!inp||!b)return;
+    const k={name:'cName',voisins:'cVoisins',folder:'cFolder',proposed:'cProposed'}[type];
+    const v=type==='jour'?jour+'T'+(c.dataset.heure||'12:00:00'):c.dataset[k];
+    if(!v){sautes++;return}
+    inp.value=v;coherence(inp);b.checked=true;faits++});
+  info.textContent=faits+' photo(s) réglée(s) et cochée(s)'+(sautes?', '+sautes+' sans date de ce type (inchangées)':'')+' — vérifie puis « Corriger ce dossier ».'}
+function corrigerDossier(btn){
+  const grille=grilleDe(btn),autres=[...document.querySelectorAll('input[name=sel]')].filter(b=>!grille.contains(b));
+  if(!grille.querySelector('input[name=sel]:checked')){alert('Aucune photo cochée dans ce dossier.');return}
+  autres.forEach(b=>b.disabled=true);
+  if(confirmer())document.getElementById('f').submit();else autres.forEach(b=>b.disabled=false)}
 function filtrer(){const f=document.getElementById('filtre').value,corr=f==='corrigees';
   document.getElementById('corrigees').hidden=!corr;document.getElementById('f').hidden=corr;
   const rien=document.getElementById('rien');if(rien)rien.hidden=corr;
@@ -1255,12 +1296,12 @@ async function suivre(){
 }
 if(wasRunning)suivre();
 function confirmer(){
-  const vides=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
-  if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked').length;
+  const vides=[...document.querySelectorAll('input[name=sel]:checked:not(:disabled)')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
+  if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked:not(:disabled)').length;
   if(!n){alert('Aucun fichier coché.');return false}
-  const ko=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.coh==='0').length;
+  const ko=[...document.querySelectorAll('input[name=sel]:checked:not(:disabled)')].filter(b=>b.closest('.card').dataset.coh==='0').length;
   if(ko&&!confirm(ko+' photo(s) cochée(s) ont une date hors de la période des autres photos du dossier. Continuer quand même ?'))return false;
-  const conv=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.convertir==='1').length;
+  const conv=[...document.querySelectorAll('input[name=sel]:checked:not(:disabled)')].filter(b=>b.closest('.card').dataset.convertir==='1').length;
   return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original).'
     +(conv?'\\n\\n'+conv+' vidéo(s) AVI/MTS/MKV seront converties en MP4 et leur original {{ 'déplacé' if originals_dir else 'SUPPRIMÉ' }}.':'')+'\\n\\nContinuer ?')}
 </script>

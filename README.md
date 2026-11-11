@@ -19,6 +19,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
 
    L'heure d'origine est conservée, ou 12:00 si la photo n'a pas d'heure. Pour une photo à trancher, rien n'est proposé d'office : des boutons Dossier / Nom / Voisines te laissent choisir.
 4. **Contrôle la cohérence** : chaque carte indique si la date choisie tombe dans la période des voisines (± tolérance). Une alerte ⚠ s'affiche sinon, un filtre regroupe ces photos, et une confirmation est demandée avant de les corriger.
+   **Par dossier**, une barre d'actions applique d'un coup à toutes les photos du dossier l'un de ces choix : la date du nom, celle des voisines, celle du dossier, les dates proposées, ou un même jour en gardant l'heure de chaque photo. Chaque photo réglée est cochée. Le bouton « Corriger ce dossier » ne corrige ensuite que ce dossier.
 5. **Corrige uniquement les photos cochées**. La date est écrite dans le fichier, sans laisser de copie `_original`. Selon le type de fichier :
    - photos : EXIF et décalage horaire ;
    - vidéos : dates QuickTime ;
