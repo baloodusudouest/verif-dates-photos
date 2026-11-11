@@ -21,6 +21,9 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   ou un même jour à toutes les photos du dossier, puis « Corriger ce dossier »
 - Dossier mal daté : « Les dates des photos sont bonnes » (validation sans modification, plus signalées
   tant que le fichier ne change pas) ou renommage du dossier proposé d'après les dates des photos
+- Vidéos : dates lues sans le mode rapide d'exiftool (qui ignorait l'atome moov placé après les
+  données et faisait passer des vidéos datées pour « sans date ») ; CreationDate toujours écrite ;
+  « Réaligner les vidéos » remet les dates QuickTime d'après CreationDate sur les vidéos touchées à tort
 - Estimation du temps pour chaque étape (index Immich, recensement, analyse) et au total, à partir
   du nombre de photos dans Immich et des durées mesurées lors de l'analyse précédente
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
@@ -29,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 import calendar
 import shutil
@@ -85,7 +88,8 @@ PHOTO_EXT = {"jpg", "jpeg", "heic", "heif", "png", "webp", "gif", "tif", "tiff"}
 VIDEO_EXT = {"mov", "mp4", "m4v", "3gp", "avi", "mkv", "mts", "m2ts"}
 RAW_EXT = {"dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "pef", "srw"}
 ALL_EXT = PHOTO_EXT | VIDEO_EXT | RAW_EXT
-NEEDS_MP4 = {"avi", "mts", "m2ts", "mkv"}   # exiftool ne sait pas y écrire de date
+NEEDS_MP4 = {"avi", "mts", "m2ts", "mkv"}
+QUICKTIME_EXT = {"mov", "mp4", "m4v", "3gp"}   # exiftool ne sait pas y écrire de date
 
 READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateDate", "-FileModifyDate",
              "-FileTypeExtension", "-Error", "-Warning"]
@@ -296,7 +300,7 @@ def propose_from_name(nd: dt.datetime, has_time: bool, d):
 
 # --------------------------------------------------------------------------- exiftool
 def run_exiftool(target: Path, recursive: bool):
-    cmd = ["exiftool", "-j", "-q", "-q", "-fast2", "-api", "QuickTimeUTC", "-d", FMT,
+    cmd = ["exiftool", "-j", "-q", "-q", "-api", "QuickTimeUTC", "-d", FMT,
            "-i", "@eaDir", "-i", "#recycle", "-i", "#snapshot", *READ_TAGS]
     for e in sorted(ALL_EXT):
         cmd += ["-ext", e]
@@ -386,13 +390,10 @@ def immich_asset_count():
         return None
 
 
-def run_exiftool_files(paths):
-    """Lit les dates d'une liste de fichiers en un seul appel exiftool (liste passée par fichier -@)."""
-    if not paths:
-        return []
+def _exiftool_list(paths, rapide):
     argfile = DATA_DIR / "exiftool-args.txt"
     argfile.write_text("\n".join(str(x) for x in paths) + "\n", encoding="utf-8")
-    cmd = ["exiftool", "-j", "-q", "-q", "-fast2", "-api", "QuickTimeUTC", "-d", FMT,
+    cmd = ["exiftool", "-j", "-q", "-q", *(["-fast2"] if rapide else []), "-api", "QuickTimeUTC", "-d", FMT,
            "-charset", "filename=utf8", *READ_TAGS, "-@", str(argfile)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     out = p.stdout.strip()
@@ -402,6 +403,16 @@ def run_exiftool_files(paths):
         return json.loads(out)
     except json.JSONDecodeError:
         return []
+
+
+def run_exiftool_files(paths):
+    """Lit les dates d'une liste de fichiers. Le mode rapide (-fast2) n'est utilisé que pour les photos :
+    sur une vidéo dont l'atome moov est placé après les données (mdat), il ne voit aucune date."""
+    if not paths:
+        return []
+    photos = [x for x in paths if Path(x).suffix.lstrip(".").lower() not in VIDEO_EXT]
+    videos = [x for x in paths if Path(x).suffix.lstrip(".").lower() in VIDEO_EXT]
+    return (_exiftool_list(photos, True) if photos else []) + (_exiftool_list(videos, False) if videos else [])
 
 
 def set_progress(**kw):
@@ -522,7 +533,8 @@ def write_date_robust(item, nd: dt.datetime):
             if note:
                 notes.append(note)
                 ok, msg = write_date(item, nd)
-    if not ok and ("Not a valid" in msg or "Corrupted" in msg or "format error" in msg.lower()):
+    if not ok and ("Not a valid" in msg or "Corrupted" in msg or "format error" in msg.lower()
+                   or "Truncated" in msg):
         item.update(status="abîmé", erreur=msg)
         return False, f"fichier abîmé, non modifié : {msg}", notes
     if ok:
@@ -586,8 +598,11 @@ def analyse_record(rec, immich_idx, stats):
     erreur = rec.get("Error") or ""
     fte = (rec.get("FileTypeExtension") or "").lower()
     vrai_ext = fte if (fte and fte in ALL_EXT and not same_ext(fte, path.suffix.lstrip("."))) else ""
+    if fte and fte not in ALL_EXT and not erreur:
+        erreur = f"le contenu n'est pas une photo ni une vidéo ({fte.upper()})"
+        fte = ""
     if erreur and not fte:
-        # 0. Fichier illisible : signalé, jamais modifié
+        # 0. Fichier illisible ou qui n'est pas une photo : signalé, jamais modifié
         status, key, proposed, psrc = "abîmé", "abime", None, ""
     # 1. Le nom du fichier contredit le dossier : toujours à trancher
     elif nd and ref and gap_days(ref, nd) > TOLERANCE_DAYS:
@@ -1026,7 +1041,8 @@ def write_date(item, nd: dt.datetime):
         for tag in ("CreateDate", "ModifyDate", "TrackCreateDate", "TrackModifyDate",
                     "MediaCreateDate", "MediaModifyDate"):
             args.append(f"-QuickTime:{tag}={v}")
-        if item.get("has_creationdate"):
+        if item.get("has_creationdate") or ext in QUICKTIME_EXT:
+            # CreationDate (Keys) passe avant CreateDate chez Immich : toujours l'écrire
             args.append(f"-Keys:CreationDate={v}{off}")
     else:
         args += [f"-AllDates={v}", f"-OffsetTimeOriginal={off}", f"-OffsetTimeDigitized={off}",
@@ -1162,7 +1178,7 @@ label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px
 .fill{height:100%;width:0;background:var(--acc);border-radius:6px;transition:width .4s ease}
 .bar.indet .fill{width:30%;position:absolute;animation:indet 1.2s ease-in-out infinite}
 @keyframes indet{0%{left:-30%}100%{left:100%}}
-.scanbtns{display:flex;gap:8px}
+.scanbtns{display:flex;gap:8px}.realign{border-color:var(--warn)}.realign button{margin-left:8px}
 .steps{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13px}
 .steps:empty{display:none}.steps li{display:flex;justify-content:space-between;gap:10px;padding:4px 8px;border-radius:6px}
 .steps li.current{background:color-mix(in srgb,var(--acc) 12%,transparent);font-weight:600}
@@ -1217,6 +1233,11 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 {% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
 {% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
 {% for m in messages %}<div class="msg">{{ m }}</div>{% endfor %}
+{% if a_realigner %}<div class="msg realign"><strong>{{ a_realigner }} vidéo(s) modifiée(s) à tort par une version précédente.</strong>
+  Elles avaient déjà une date d'origine (CreationDate) que l'outil ne voyait pas : seuls les champs QuickTime secondaires
+  et la date du fichier ont été changés (Immich affiche toujours la date d'origine).
+  <form method="post" action="{{ url_for('realigner') }}" style="display:inline"><button {% if state.running %}disabled{% endif %}
+  onclick="return confirm('Remettre les dates QuickTime et la date du fichier de ces vidéos sur leur date d\u2019origine (CreationDate) ?')">Réaligner ces vidéos</button></form></div>{% endif %}
 {% if not pending and state.scanned_at and not state.running %}<div class="msg res-ok" id="rien">Aucune photo à traiter.</div>{% endif %}
 <form id="f" method="post" action="{{ url_for('apply') }}">
 {% for folder, group in groups %}
@@ -1436,7 +1457,8 @@ def index():
     return render_template_string(PAGE, state=state, pending=pending, groups=list(groups.items()),
                                   corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__,
-                                  has_cache=CACHE_FILE.exists(), originals_dir=bool(ORIGINALS_DIR))
+                                  has_cache=CACHE_FILE.exists(), originals_dir=bool(ORIGINALS_DIR),
+                                  a_realigner=0 if state["running"] else len(videos_a_realigner()))
 
 
 @app.post("/scan")
@@ -1573,6 +1595,82 @@ def progress():
     st["steps"] = steps
     st["total_remaining"] = None if (inconnu or not steps) else int(total_rest)
     return st
+
+
+REALIGNED_FILE = DATA_DIR / "videos-realignees.json"
+RE_RELU_CREATION = re.compile(r"^relu .* \(CreationDate\)$")
+
+
+def videos_a_realigner():
+    """Vidéos modifiées à tort par les versions < 1.10 : passées pour « sans date » à cause du mode rapide,
+    elles ont reçu une date dans les champs QuickTime alors que leur CreationDate (prioritaire) était là.
+    Repérées dans corrections.csv (échec « relu … (CreationDate) »), hors celles déjà réalignées."""
+    if not LOG_FILE.exists():
+        return []
+    try:
+        faits = set(json.loads(REALIGNED_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        faits = set()
+    liste = []
+    with LOG_FILE.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f, delimiter=";"):
+            p = row.get("fichier", "")
+            if row.get("statut") == "échec" and RE_RELU_CREATION.match(row.get("detail", "")) \
+                    and p not in faits and p not in liste and Path(p).exists():
+                liste.append(p)
+    return liste
+
+
+def realign_worker(paths):
+    faits = []
+    try:
+        faits = json.loads(REALIGNED_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    ok_n, ko = 0, []
+    try:
+        set_progress(phase="Réalignement des vidéos sur leur CreationDate", total=len(paths), done=0,
+                     started=now_ts(), steps=[])
+        for n, p in enumerate(paths, 1):
+            set_progress(progress=Path(p).name)
+            tags = ["CreateDate", "ModifyDate", "TrackCreateDate", "TrackModifyDate", "MediaCreateDate", "MediaModifyDate"]
+            args = ["exiftool", "-overwrite_original", "-q", "-m", "-api", "QuickTimeUTC",
+                    *[f"-QuickTime:{t}<CreationDate" for t in tags], "-FileModifyDate<CreationDate", p]
+            r = subprocess.run(args, capture_output=True, text=True)
+            lu = run_exiftool(Path(p), False)
+            rec = lu[0] if lu else {}
+            a, b = parse_date(rec.get("CreationDate")), parse_date(rec.get("CreateDate"))
+            if r.returncode == 0 and a and b and abs((a - b).total_seconds()) <= 60:
+                ok_n += 1
+                faits.append(p)
+                with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+                    csv.writer(f, delimiter=";").writerow([dt.datetime.now().isoformat(timespec="seconds"), p, "",
+                                                           "CreationDate", a.strftime("%d/%m/%Y %H:%M:%S"), "ok",
+                                                           "réaligné sur CreationDate"])
+            else:
+                ko.append(Path(p).name)
+            set_progress(done=n)
+        REALIGNED_FILE.write_text(json.dumps(faits, ensure_ascii=False), encoding="utf-8")
+        msg = f"{ok_n} vidéo(s) réalignée(s) sur leur date d'origine (CreationDate)."
+        if ko:
+            msg += f" {len(ko)} non réalignée(s) : " + ", ".join(ko[:10]) + ("…" if len(ko) > 10 else "")
+        set_progress(messages=[msg + " Lance « Scanner les nouveaux » pour mettre la liste à jour."])
+    except Exception as exc:
+        set_progress(error=str(exc))
+    finally:
+        set_progress(running=False, kind="", phase="")
+
+
+@app.post("/realigner")
+def realigner():
+    paths = videos_a_realigner()
+    with LOCK:
+        if STATE["running"] or not paths:
+            return redirect(url_for("index"))
+        STATE.update(running=True, kind="correction", error=None, messages=[], progress="", done=0,
+                     total=len(paths), steps=[], total_estime=False)
+    threading.Thread(target=realign_worker, args=(paths,), daemon=True).start()
+    return redirect(url_for("index"))
 
 
 @app.post("/valider")

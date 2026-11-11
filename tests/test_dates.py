@@ -408,3 +408,49 @@ def test_dossier_mal_date_valider_ou_renommer(app):
     # garde-fous
     assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "../evasion"}).status_code == 400
     assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "2010/2010-04 Pâques"}).status_code == 409
+
+
+def _mov_moov_en_fin(path, creation="2014-08-31T02:18:25+0200"):
+    """Vidéo façon iPhone : atome moov après les données, CreationDate dans les clés Apple."""
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=1",
+                    "-c:v", "libx264", "-movflags", "use_metadata_tags",
+                    "-metadata", f"com.apple.quicktime.creationdate={creation}", str(path)], check=True)
+
+
+@pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
+def test_video_moov_en_fin_et_realignement(app):
+    dossier = app.SCAN_DIR / "2014" / "2014-08 - Soirée jeux"
+    dossier.mkdir(parents=True)
+    bonne = dossier / "2014-08-31-1707031775.mov"
+    _mov_moov_en_fin(bonne)
+    data = bonne.read_bytes()
+    assert data.find(b"mdat") < data.find(b"moov")          # moov bien après les données
+    app.scan_worker("tout")
+    assert app.STATE["items"] == []                          # date d'origine vue : plus de faux « sans date »
+
+    # vidéo touchée à tort par une ancienne version : CreateDate écrasée, CreationDate intacte
+    abimee = dossier / "2014-08-31-1710031774.mov"
+    _mov_moov_en_fin(abimee, "2014-08-31T01:14:34+0200")
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-api", "QuickTimeUTC",
+                    "-QuickTime:CreateDate=2014:08:31 17:10:03", str(abimee)], check=True)
+    with open(app.LOG_FILE, "w", encoding="utf-8", newline="") as f:
+        f.write("horodatage;fichier;ancienne_date;source;nouvelle_date;statut;detail\n")
+        f.write(f"2026-11-11T12:00:00;{abimee};;;31/08/2014 17:10:03;échec;relu 31/08/2014 01:14:34 (CreationDate)\n")
+    client = app.app.test_client()
+    assert "1 vidéo(s) modifiée(s) à tort" in client.get("/").get_data(as_text=True)
+    app.STATE["running"] = False
+    app.realign_worker(app.videos_a_realigner())
+    rec = app.run_exiftool(abimee, False)[0]
+    assert rec["CreateDate"] == rec["CreationDate"] == "2014-08-31 01:14:34"
+    assert app.videos_a_realigner() == []
+    assert "1 vidéo(s) réalignée(s)" in app.STATE["messages"][0]
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_xmp_nomme_jpg_signale_abime(app):
+    dossier = app.SCAN_DIR / "2012" / "2012-05-01 Mai"
+    dossier.mkdir(parents=True)
+    (dossier / "IMG_0001.JPG").write_text('<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta><?xpacket end="w"?>')
+    app.scan_worker("tout")
+    it = app.STATE["items"][0]
+    assert it["status"] == "abîmé" and "XMP" in it["erreur"]
