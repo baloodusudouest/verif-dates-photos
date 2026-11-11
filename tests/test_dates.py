@@ -245,3 +245,51 @@ def test_conversion_garde_original(app, tmp_path, monkeypatch):
     assert ok, msg
     assert (tmp_path / "originaux" / "Pellicule" / "2015" / "2015-06-20 Fête" / "clip.avi").exists()
     assert new.name == "clip.mp4" and new.exists()
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_estimations_par_etape(app):
+    dossier = app.SCAN_DIR / "2019" / "2019-07-14 Mariage"
+    dossier.mkdir(parents=True)
+    img = Image.new("RGB", (8, 8), "red")
+    for n in range(120):
+        img.save(dossier / f"p{n:03d}.jpg")
+    client = app.app.test_client()
+    app.STATE["running"] = True
+    app.scan_worker("tout")                                    # 1re analyse : pas de mesures
+    meta = app.load_meta()
+    assert meta["files_total"] == 120 and meta["walk_rate"] > 0 and meta["analyse_rate"] > 0
+
+    vus = []
+    origine = app.run_exiftool_files
+
+    def espion(paths):
+        if not vus:
+            vus.append(client.get("/progress").get_json())
+        return origine(paths)
+
+    app.run_exiftool_files = espion
+    app.STATE["running"] = True
+    app.scan_worker("tout")                                    # 2e analyse : étapes estimées
+    app.run_exiftool_files = origine
+    st = vus[0]
+    etapes = {e["key"]: e for e in st["steps"]}
+    assert etapes["index"]["status"] == "skipped"              # Immich non configuré dans les tests
+    assert etapes["walk"]["status"] == "done" and etapes["walk"]["duration"] is not None
+    assert etapes["analyse"]["status"] == "current" and etapes["analyse"]["estimate"] is not None
+    assert st["total_remaining"] is not None
+    html = client.get("/").get_data(as_text=True)
+    assert 'id="prog-steps"' in html
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node absent")
+def test_javascript_valide(app, tmp_path):
+    """Le script de la page doit se lire sans erreur de syntaxe (cas réel : apostrophe mal échappée)."""
+    app.STATE.update(running=True, steps=[])
+    html = app.app.test_client().get("/").get_data(as_text=True)
+    app.STATE["running"] = False
+    js = html.split("<script>")[1].split("</script>")[0]
+    f = tmp_path / "page.js"
+    f.write_text(js, encoding="utf-8")
+    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr

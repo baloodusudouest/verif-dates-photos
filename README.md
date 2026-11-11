@@ -30,6 +30,13 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
 6. **Range les photos corrigées** dans la vue « Déjà corrigées » (avant → après), hors de la liste à traiter. Si un nouveau scan trouve encore un écart sur une photo corrigée, elle revient dans « À traiter » avec la mention « Déjà corrigée le … ».
 7. **Immich (facultatif)** : la page affiche la date connue d'Immich et ses miniatures. Après correction, elle lui demande de relire les métadonnées.
 
+Pendant une analyse, la page affiche les trois étapes : lecture de l'index Immich, recensement des fichiers, analyse des dates. Pour chacune, elle indique :
+- la durée, une fois l'étape terminée ;
+- le temps restant, pour l'étape en cours ;
+- une estimation, pour les étapes à venir, calculée à partir des mesures de l'analyse précédente (`/data/mesures.json`).
+
+Elle affiche aussi le temps restant au total.
+
 ## Installation (Portainer)
 
 ```yaml
@@ -69,6 +76,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
 - `asset.read` : lire la liste des fichiers et leurs dates ;
 - `asset.view` : afficher les miniatures ;
 - `job.create` : demander la relecture des métadonnées après correction.
+- `asset.statistics` (facultatif) : connaître le nombre de photos dans Immich, pour estimer la durée de la lecture de l'index dès la première analyse.
 
 Si la relecture est refusée, lance un scan de la bibliothèque externe.
 

@@ -14,13 +14,15 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
   sans perte, réencodage seulement si nécessaire), date écrite et vérifiée, puis original supprimé
   (ou déplacé dans ORIGINALS_DIR si défini)
 - Photos corrigées retirées de la liste « À traiter » et rangées dans « Déjà corrigées »
+- Estimation du temps pour chaque étape (index Immich, recensement, analyse) et au total, à partir
+  du nombre de photos dans Immich et des durées mesurées lors de l'analyse précédente
 - Barre de progression en direct (index Immich, recensement, analyse fichier par fichier, corrections)
 - Affiche une page de vérification avec miniatures (Immich si l'asset est connu, sinon locales)
 - Ne corrige QUE les fichiers cochés, puis relit le fichier pour vérifier l'écriture
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 import calendar
 import shutil
@@ -66,7 +68,8 @@ LOG_FILE = DATA_DIR / "corrections.csv"
 CORRECTED_FILE = DATA_DIR / "corrigees.json"   # photos corrigées (section « Déjà corrigées »)
 VOISINES_MIN = 2         # nombre minimal d'autres photos datées pour juger la cohérence
 VOISINES_PART = 0.5      # part minimale du jour dominant pour le proposer
-CACHE_FILE = DATA_DIR / "cache.json"   # résultat par fichier (taille + date de modification) pour le mode incrémental
+CACHE_FILE = DATA_DIR / "cache.json"
+META_FILE = DATA_DIR / "mesures.json"   # durées et volumes de la dernière analyse, pour les estimations   # résultat par fichier (taille + date de modification) pour le mode incrémental
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 THUMBS.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +99,7 @@ STATE = {
     "kind": "",         # "analyse" ou "correction"
     "started": None,    # horodatage de début, pour le temps restant
     "messages": [],     # messages à afficher à la fin d'une correction
+    "steps": [],        # étapes de l'analyse : libellé, statut, durée, estimation
 }
 ITEMS = {}
 CORRECTED = {}   # chemin → enregistrement de la correction
@@ -295,15 +299,73 @@ SKIP_DIRS = {"@eaDir", "#recycle", "#snapshot"}
 CHUNK = 100   # fichiers par appel exiftool : assez gros pour être rapide, assez petit pour la barre
 
 
-def list_files():
+def list_files(on_progress=None):
     """Recense les fichiers à analyser (ignore les dossiers techniques Synology)."""
-    files = []
+    files, last = [], 0
     for root, dirs, names in os.walk(SCAN_DIR):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
         for n in sorted(names):
             if not n.startswith(".") and Path(n).suffix.lstrip(".").lower() in ALL_EXT:
                 files.append(Path(root) / n)
+        if on_progress and len(files) - last >= 200:
+            last = len(files)
+            on_progress(len(files), root)
     return files
+
+
+# --------------------------------------------------------------------------- étapes et estimations
+def load_meta():
+    try:
+        return json.loads(META_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_meta(meta):
+    try:
+        META_FILE.write_text(json.dumps(meta), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def now_ts():
+    return dt.datetime.now().timestamp()
+
+
+def step_start(key, total=0, total_estime=False):
+    """Passe l'étape `key` en cours ; la barre repart de zéro avec son propre chrono."""
+    with LOCK:
+        for st in STATE["steps"]:
+            if st["key"] == key:
+                st.update(status="current", started=now_ts())
+        STATE.update(phase=next(s["label"] for s in STATE["steps"] if s["key"] == key), done=0,
+                     total=total, total_estime=total_estime, started=now_ts(), progress="")
+
+
+def step_end(key):
+    with LOCK:
+        for st in STATE["steps"]:
+            if st["key"] == key and st["status"] == "current":
+                st.update(status="done", duration=now_ts() - st["started"])
+                return st["duration"]
+    return None
+
+
+def step_estimate(key, seconds):
+    with LOCK:
+        for st in STATE["steps"]:
+            if st["key"] == key:
+                st["estimate"] = None if seconds is None else int(seconds)
+
+
+def immich_asset_count():
+    """Nombre total de photos et vidéos dans Immich (sert à estimer la lecture de l'index)."""
+    try:
+        r = requests.get(f"{IMMICH_URL}/api/assets/statistics", headers=immich_headers(), timeout=30)
+        r.raise_for_status()
+        return int(r.json().get("total") or 0) or None
+    except Exception:
+        return None
 
 
 def run_exiftool_files(paths):
@@ -338,10 +400,15 @@ def pick_date(rec):
 
 
 # --------------------------------------------------------------------------- index Immich
-def immich_index():
+def immich_index(meta=None):
     if not immich_enabled():
-        return {}, "API Immich non configurée : miniatures locales, pas de date Immich."
-    idx, page = {}, 1
+        return {}, "API Immich non configurée : miniatures locales, pas de date Immich.", 0
+    meta = meta or {}
+    total = immich_asset_count()
+    estime = total is None and bool(meta.get("index_total"))
+    total = total or meta.get("index_total") or 0
+    step_start("index", total=total, total_estime=estime)
+    idx, page, vus = {}, 1, 0
     try:
         while page:
             r = requests.post(f"{IMMICH_URL}/api/search/metadata", headers=immich_headers(),
@@ -349,15 +416,19 @@ def immich_index():
             r.raise_for_status()
             assets = r.json().get("assets", {})
             for it in assets.get("items", []):
+                vus += 1
                 op = it.get("originalPath", "")
                 if op.startswith(IMMICH_ROOT + "/"):
                     idx[op] = (it.get("id"), it.get("localDateTime"))
             nxt = assets.get("nextPage")
             page = int(nxt) if nxt else None
-            set_progress(progress=f"{len(idx)} fichiers de la photothèque trouvés (page {page or 'fin'})")
-        return idx, f"Immich : {len(idx)} fichiers de la photothèque indexés."
+            with LOCK:
+                if STATE["total"] and vus > STATE["total"]:
+                    STATE["total"] = vus
+                STATE.update(done=vus, progress=f"{len(idx)} fichiers de la Pellicule reconnus dans Immich")
+        return idx, f"Immich : {len(idx)} fichiers de la photothèque indexés.", vus
     except Exception as exc:
-        return idx, f"Immich injoignable ou API refusée ({exc}). Analyse faite sur les fichiers seuls."
+        return idx, f"Immich injoignable ou API refusée ({exc}). Analyse faite sur les fichiers seuls.", vus
 
 
 # --------------------------------------------------------------------------- analyse
@@ -523,11 +594,38 @@ def scan_worker(mode="tout"):
     """mode « tout » : tout relire ; mode « nouveaux » : seuls les fichiers nouveaux ou modifiés."""
     try:
         stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "sans_ref": 0}
-        set_progress(phase="1/3 · Lecture de l'index Immich", progress="", done=0, total=0)
-        immich_idx, immich_msg = immich_index()
+        meta = load_meta()
+        fichiers_prev = meta.get("files_total")
+        estime = lambda n, cle: (n * meta[cle]) if (n and meta.get(cle) is not None) else None
+        with LOCK:
+            STATE["steps"] = [
+                {"key": "index", "label": "1/3 · Lecture de l'index Immich", "status": "todo",
+                 "estimate": None if not immich_enabled() else estime(meta.get("index_total"), "index_rate")},
+                {"key": "walk", "label": "2/3 · Recensement des fichiers", "status": "todo",
+                 "estimate": estime(fichiers_prev, "walk_rate")},
+                {"key": "analyse", "label": "3/3 · Analyse des dates", "status": "todo",
+                 "estimate": estime(fichiers_prev, "analyse_rate") if mode == "tout" else None},
+            ]
+            if not immich_enabled():
+                STATE["steps"][0].update(status="skipped")
 
-        set_progress(phase="2/3 · Recensement des fichiers", progress="", immich=immich_msg)
-        files = list_files()
+        t0 = now_ts()
+        immich_idx, immich_msg, nb_immich = immich_index(meta)
+        duree_index = step_end("index")
+
+        step_start("walk", total=fichiers_prev or 0, total_estime=bool(fichiers_prev))
+        set_progress(immich=immich_msg)
+
+        def avance(n, dossier):
+            with LOCK:
+                if STATE["total"] and n > STATE["total"]:
+                    STATE["total"] = n
+                try:
+                    STATE.update(done=n, progress=str(Path(dossier).relative_to(LOCAL_ROOT)))
+                except ValueError:
+                    STATE.update(done=n)
+        files = list_files(avance)
+        duree_walk = step_end("walk")
         old_cache = load_cache() if mode == "nouveaux" else {}
         new_cache, items, to_scan, reused = {}, [], [], 0
         voisins = {}   # dossier → [(chemin, date, cohérente)]
@@ -553,10 +651,13 @@ def scan_worker(mode="tout"):
             else:
                 to_scan.append(f)
 
-        libelle = "3/3 · Analyse des dates"
+        step_estimate("analyse", estime(len(to_scan), "analyse_rate"))
         if mode == "nouveaux":
-            libelle += f" — {len(to_scan):,} nouveaux ou modifiés, {reused:,} repris".replace(",", " ")
-        set_progress(phase=libelle, total=len(to_scan), done=0, started=dt.datetime.now().timestamp())
+            with LOCK:
+                STATE["steps"][2]["label"] = (f"3/3 · Analyse des dates — {len(to_scan):,} nouveaux ou modifiés, "
+                                              f"{reused:,} repris").replace(",", " ")
+        step_start("analyse", total=len(to_scan))
+        t_analyse = now_ts()
         for i in range(0, len(to_scan), CHUNK):
             chunk = to_scan[i:i + CHUNK]
             set_progress(progress=str(chunk[0].parent.relative_to(LOCAL_ROOT)))
@@ -587,6 +688,17 @@ def scan_worker(mode="tout"):
                                     f"{reused} repris de l'analyse précédente."] if mode == "nouveaux" else []))
             ITEMS.clear()
             ITEMS.update({it["id"]: it for it in items})
+        duree_analyse = now_ts() - t_analyse
+        step_end("analyse")
+        # mesures pour estimer la prochaine analyse
+        if nb_immich and duree_index:
+            meta.update(index_total=nb_immich, index_rate=duree_index / nb_immich)
+        if files and duree_walk is not None:
+            meta.update(files_total=len(files), walk_rate=duree_walk / len(files))
+        if len(to_scan) >= 50:
+            meta.update(analyse_rate=duree_analyse / len(to_scan))
+        meta["last_total_s"] = round(now_ts() - t0)
+        save_meta(meta)
         save_cache(new_cache)
         save_results()
     except Exception as exc:
@@ -824,6 +936,11 @@ label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px
 .bar.indet .fill{width:30%;position:absolute;animation:indet 1.2s ease-in-out infinite}
 @keyframes indet{0%{left:-30%}100%{left:100%}}
 .scanbtns{display:flex;gap:8px}
+.steps{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:13px}
+.steps:empty{display:none}.steps li{display:flex;justify-content:space-between;gap:10px;padding:4px 8px;border-radius:6px}
+.steps li.current{background:color-mix(in srgb,var(--acc) 12%,transparent);font-weight:600}
+.steps li.done{color:var(--ok)}.steps li.todo,.steps li.skipped{color:var(--mute)}
+.prog-total{font-weight:700;text-align:right}.prog-total:empty{display:none}
 select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 </style></head><body>
 <header>
@@ -865,6 +982,8 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   <div class="prog-head"><strong id="prog-phase">{{ state.phase }}</strong><span id="prog-count" class="mute"></span></div>
   <div class="bar"><div id="prog-fill" class="fill"></div></div>
   <div class="prog-foot"><span id="prog-detail" class="mute"></span><span id="prog-eta" class="mute"></span></div>
+  <ol id="prog-steps" class="steps"></ol>
+  <div id="prog-total" class="prog-total"></div>
 </div>
 {% if state.error %}<div class="msg res-ko">Erreur : {{ state.error }}</div>{% endif %}
 {% if state.immich %}<div class="msg mute">{{ state.immich }}</div>{% endif %}
@@ -956,8 +1075,20 @@ function choisir(btn,v){const c=btn.closest('.body'),inp=c.querySelector('input[
   const b=c.querySelector('input[type=checkbox]');if(b)b.checked=true}
 try{const f0=localStorage.getItem('verif-filtre'),sel=document.getElementById('filtre');
   if(f0&&sel&&f0!=='corrigees'&&[...sel.options].some(o=>o.value===f0)){sel.value=f0;filtrer()}}catch(e){}
-function duree(s){if(s==null)return'';if(s<60)return'≈ '+s+' s restantes';
-  const m=Math.round(s/60);return m<60?'≈ '+m+' min restantes':'≈ '+Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' restantes'}
+function fmt(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';const m=Math.round(s/60);
+  return m<60?m+' min':Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')}
+function duree(s){return s==null?'':'≈ '+fmt(s)+' restantes'}
+function etapes(st){const ol=document.getElementById('prog-steps');ol.innerHTML='';
+  (st.steps||[]).forEach(x=>{const li=document.createElement('li');li.className=x.status;
+    let droite='';
+    if(x.status==='done')droite='✓ terminé en '+fmt(x.duration||0);
+    else if(x.status==='current')droite='en cours'+(x.remaining!=null?' · ≈ '+fmt(x.remaining):' · estimation en cours…');
+    else if(x.status==='skipped')droite='sans objet';
+    else droite=x.estimate!=null?'≈ '+fmt(x.estimate)+' (d’après la dernière analyse)':'durée inconnue (1re analyse)';
+    const a=document.createElement('span');a.textContent=(x.status==='done'?'✓ ':x.status==='current'?'▶ ':'○ ')+x.label;
+    const b=document.createElement('span');b.textContent=droite;li.append(a,b);ol.append(li)});
+  document.getElementById('prog-total').textContent=(st.steps&&st.steps.length)
+    ?(st.total_remaining!=null?'Temps restant estimé au total : ≈ '+fmt(st.total_remaining):'Temps total : estimation disponible dès que les étapes en cours auront avancé'):''}
 let wasRunning={{ 'true' if state.running else 'false' }};
 async function suivre(){
   let st;try{st=await (await fetch('{{ url_for('progress') }}',{cache:'no-store'})).json()}catch(e){return setTimeout(suivre,3000)}
@@ -966,9 +1097,11 @@ async function suivre(){
     wasRunning=true;box.hidden=false;
     document.getElementById('prog-phase').textContent=st.phase||'…';
     const bar=box.querySelector('.bar'),fill=document.getElementById('prog-fill');
-    if(st.total>0){bar.classList.remove('indet');const pc=Math.floor(st.done*100/st.total);fill.style.width=pc+'%';
-      document.getElementById('prog-count').textContent=st.done.toLocaleString('fr-FR')+' / '+st.total.toLocaleString('fr-FR')+' · '+pc+' %';}
-    else{bar.classList.add('indet');fill.style.width='';document.getElementById('prog-count').textContent='';}
+    if(st.total>0){bar.classList.remove('indet');const pc=Math.min(99,Math.floor(st.done*100/st.total));fill.style.width=pc+'%';
+      document.getElementById('prog-count').textContent=st.done.toLocaleString('fr-FR')+' / '+(st.total_estime?'≈ ':'')+st.total.toLocaleString('fr-FR')+' · '+pc+' %';}
+    else{bar.classList.add('indet');fill.style.width='';
+      document.getElementById('prog-count').textContent=st.done?st.done.toLocaleString('fr-FR')+' trouvés':'';}
+    etapes(st);
     document.getElementById('prog-detail').textContent=st.progress||'';
     document.getElementById('prog-eta').textContent=duree(st.remaining);
     setTimeout(suivre,1500);
@@ -983,7 +1116,7 @@ function confirmer(){
   if(ko&&!confirm(ko+' photo(s) cochée(s) ont une date hors de la période des autres photos du dossier. Continuer quand même ?'))return false;
   const conv=[...document.querySelectorAll('input[name=sel]:checked')].filter(b=>b.closest('.card').dataset.convertir==='1').length;
   return confirm(n+' fichier(s) vont être modifiés directement sur le NAS (sans copie _original).'
-    +(conv?'\n\n'+conv+' vidéo(s) AVI/MTS/MKV seront converties en MP4 et leur original {{ 'déplacé' if originals_dir else 'SUPPRIMÉ' }}.':'')+'\n\nContinuer ?')}
+    +(conv?'\\n\\n'+conv+' vidéo(s) AVI/MTS/MKV seront converties en MP4 et leur original {{ 'déplacé' if originals_dir else 'SUPPRIMÉ' }}.':'')+'\\n\\nContinuer ?')}
 </script>
 </body></html>"""
 
@@ -1017,7 +1150,7 @@ def scan():
         if STATE["running"]:
             return redirect(url_for("index"))
         STATE.update(running=True, kind="analyse", error=None, messages=[], phase="Démarrage…",
-                     progress="", done=0, total=0, started=None)
+                     progress="", done=0, total=0, started=None, steps=[], total_estime=False)
     mode = "nouveaux" if request.form.get("mode") == "nouveaux" and CACHE_FILE.exists() else "tout"
     if mode == "tout":
         for f in THUMBS.glob("*.jpg"):
@@ -1103,7 +1236,7 @@ def apply():
         if STATE["running"] or not jobs:
             return redirect(url_for("index"))
         STATE.update(running=True, kind="correction", error=None, messages=[], progress="", done=0,
-                     total=len(jobs))
+                     total=len(jobs), steps=[], total_estime=False)
     APPLY_THREAD = threading.Thread(target=apply_worker, args=(jobs,), daemon=True)
     APPLY_THREAD.start()
     return redirect(url_for("index"))
@@ -1112,12 +1245,32 @@ def apply():
 @app.get("/progress")
 def progress():
     with LOCK:
-        st = {k: STATE[k] for k in ("running", "kind", "phase", "progress", "done", "total", "started", "error")}
+        st = {k: STATE.get(k) for k in ("running", "kind", "phase", "progress", "done", "total", "started",
+                                        "error", "total_estime")}
+        steps = [dict(x) for x in STATE.get("steps") or []]
     remaining = None
     if st["running"] and st["started"] and st["total"] and 0 < st["done"] < st["total"]:
-        elapsed = dt.datetime.now().timestamp() - st["started"]
-        remaining = int(elapsed / st["done"] * (st["total"] - st["done"]))
+        elapsed = now_ts() - st["started"]
+        if elapsed > 2:   # trop tôt, l'estimation n'aurait pas de sens
+            remaining = int(elapsed / st["done"] * (st["total"] - st["done"]))
     st["remaining"] = remaining
+    # temps restant total : étape en cours + étapes à venir estimées
+    total_rest, inconnu = remaining or 0, remaining is None and st["total"] != st["done"]
+    for x in steps:
+        x.pop("started", None)
+        if x["status"] == "current":
+            x["remaining"] = remaining
+            if remaining is None:
+                x["remaining"] = x.get("estimate")
+                total_rest = x.get("estimate") or 0
+                inconnu = x.get("estimate") is None
+        elif x["status"] == "todo":
+            if x.get("estimate") is None:
+                inconnu = True
+            else:
+                total_rest += x["estimate"]
+    st["steps"] = steps
+    st["total_remaining"] = None if (inconnu or not steps) else int(total_rest)
     return st
 
 
