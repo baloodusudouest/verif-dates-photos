@@ -1,5 +1,7 @@
 # verif-dates-photos
 
+> **Version 2.0.0** : même outil, mêmes règles, avec un mot de passe, un mode lecture seule et l'habillage commun aux autres applis (rail, tuiles, sections Connexion et Réglages). Voir `CHANGELOG.md`.
+
 Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée par dossiers
 (`Pellicule/<année>/<AAAA-MM-JJ évènement>/`) avant de les migrer dans le stockage d'Immich.
 

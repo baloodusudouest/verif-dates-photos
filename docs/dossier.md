@@ -1,6 +1,6 @@
-# Dossier de la vérification des dates — tel que construit (version 1.10.1)
+# Dossier de la vérification des dates — tel que construit (version 2.0.0)
 
-Rédigé le 11/11/2026 à partir du code, à la réouverture de l'outil pour le mettre au même format que carnet (2.10) et Millésime (2.0). Six sections, puis les écarts et le plan proposé.
+Rédigé le 11/11/2026 à partir du code, à la réouverture de l'outil pour le mettre au même format que carnet (2.10) et Millésime (2.0). Six sections, puis les écarts et le plan proposé. **Mis à jour le même jour pour la 2.0.0** (voie médiane retenue après le conseil) : les sections décrivent la 1.10.1, suivies de ce qui a changé.
 
 ---
 
@@ -45,7 +45,13 @@ Une seule page.
 
 Adresses : `/` (page), `/scan`, `/apply`, `/progress`, `/valider`, `/renommer`, `/realigner`, `/thumb/<id>`, `/journal.csv`.
 
+### Depuis la 2.0.0
+
+Même page et mêmes gestes, réorganisés : rail (À traiter, Corrigées, Connexion, Réglages), tuiles à la place du menu de filtre, « Déjà corrigées » devenue l'entrée Corrigées, deux sections en lecture (Connexion, Réglages). Un mot de passe est demandé à l'entrée (1.11.0). Adresses ajoutées : `/connexion`, `/deconnexion`, `/health`.
+
 ## 4. Design
+
+**Depuis la 2.0.0** : habillage commun aux applis (fonds neutres chauds, sombre par défaut et clair selon l'appareil, tuiles), couleur bleu ardoise. Ce qui suit décrit la 1.10.1.
 
 Page utilitaire : styles écrits à la main dans le modèle, sombre, dense, pensée pour le PC. Pas de navigation.
 
@@ -95,7 +101,9 @@ Fait : versions 1.0 à 1.10.1 (novembre 2026). Proposé : voir plus bas.
 | **2.0.0** | Découpage en modules sans changer une règle (4), FastAPI et Svelte (3), habillage bleu ardoise (5), quatre entrées et tuiles (6, 7), tests d'écran (10) | Les 17 tests passent sans modification de leurs attentes ; mêmes fichiers d'état ; un jour en lecture seule ; retour par `VERIF_DATES_VERSION=1.11.0` |
 | **2.1.0** | Remettre l'ancienne date (9) | Test : corriger puis remettre rend le fichier identique, date pour date |
 
-**Ce qui reste à trancher par Julien :**
+**Tranché par Julien le 11/11/2026, après le conseil** : l'outil continuera de servir après la migration ; voie médiane (habillage et navigation sur le serveur actuel) ; pas de corbeille par défaut ; pas de « remettre l'ancienne date ». Faits : écarts 1 et 2 (1.11.0), 5, 6 et 10 (2.0.0, sans changer de serveur), 11 et 12. Restent pour plus tard, puisque l'outil doit vivre : 3 et 4 (modules, puis FastAPI et Svelte), en livraisons séparées.
+
+Questions posées avant :
 1. Réécrire l'interface (2.0.0) alors que l'outil sert jusqu'à la migration seulement, ou s'arrêter à la 1.11.0 et rhabiller la page existante.
 2. Quatre entrées avec tuiles, ou garder une seule page de travail avec un filtre.
 3. « Remettre l'ancienne date » : maintenant, plus tard, ou jamais.

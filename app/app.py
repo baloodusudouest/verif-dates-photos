@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "1.11.0"
+__version__ = "2.0.0"
 
 import calendar
 import shutil
@@ -1249,13 +1249,18 @@ PAGE = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Vérif dates Pellicule</title>
 <style>
-:root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--warn:#c2410c;--bad:#b91c1c;--ok:#15803d;--acc:#2563eb}
-@media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-h1{font-size:18px;margin:0 12px 0 0}main{padding:16px;max-width:1400px;margin:auto}
-button,.btn{border:0;border-radius:8px;padding:8px 14px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer;text-decoration:none}
-button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
+/* 2.0.0 : habillage commun aux applis (celui de carnet) : fonds neutres chauds, sombre par défaut,
+   clair quand l'appareil le demande. Couleur de l'outil : bleu ardoise. Les noms des variables et
+   des classes d'avant sont gardés : le script de la page et les gestes n'ont pas changé. */
+:root{color-scheme:dark;--bg:#151311;--card:#1f1c19;--ink:#f2ece2;--mute:#a89e91;--line:#312c27;--bord:#4b443c;
+  --warn:#e39a4b;--bad:#ef7b72;--ok:#7fc493;--acc:#7f9cc4;--sur-acc:#10161f;--ombre:rgb(0 0 0 / .5)}
+@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#faf7f2;--card:#f1ece3;--ink:#1e1a16;--mute:#6f665b;--line:#e3dbcd;--bord:#cabfad;
+  --warn:#b45309;--bad:#c0392b;--ok:#2f7d4a;--acc:#3f5d86;--sur-acc:#ffffff;--ombre:rgb(30 30 40 / .16)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 20px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+h1{font-size:1.9rem;font-weight:300;letter-spacing:-.03em;line-height:1.15;margin:0 12px 0 0;flex-basis:100%}main{padding:16px 20px;max-width:1400px}
+button,.btn{border:1px solid var(--acc);border-radius:8px;padding:8px 14px;background:var(--acc);color:var(--sur-acc);font-weight:600;font:inherit;font-weight:600;cursor:pointer;text-decoration:none}button:disabled{opacity:.45;cursor:not-allowed}
+button.sec,.btn.sec{background:transparent;color:var(--ink);border:1px solid var(--bord);font-weight:500}button.sec:hover,.btn.sec:hover{background:var(--card)}
 .stats{color:var(--mute);font-size:13px}.msg{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:14px}
 .folder{margin:22px 0 8px;display:flex;flex-direction:column;gap:8px}.folder h2{font-size:15px;margin:0}
 .folder-titre{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
@@ -1266,10 +1271,10 @@ button.sec{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .folder-actions input[type=date]{padding:4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 .dossier-info{font-size:12px}.folder-actions.renommage input[type=text]{flex:1;min-width:200px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
-.card img{width:100%;height:170px;object-fit:cover;background:#ccc}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.card img{width:100%;height:170px;object-fit:cover;background:var(--line)}.body{padding:10px;font-size:13px;display:flex;flex-direction:column;gap:4px}
 .name{font-weight:600;word-break:break-all}.tag{display:inline-block;border-radius:5px;padding:1px 6px;font-size:12px;font-weight:600;color:#fff}
-.t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-abime{background:#57534e}.t-trancher{background:#7c3aed}.mute{color:var(--mute)}
+.tag{color:var(--bg)}.t-ecart{background:var(--warn)}.t-sans{background:var(--bad)}.t-abime{background:var(--mute)}.t-trancher{background:var(--acc)}.mute{color:var(--mute)}
 .t-ok{background:var(--ok)}.card.done{opacity:.9}.actions{display:flex;gap:8px;flex-wrap:wrap}
 .coh{font-size:12px;font-weight:600}.coh-ok{color:var(--ok)}.coh-ko{color:var(--warn)}
 .choix{display:flex;gap:6px;flex-wrap:wrap}.choix button{padding:4px 8px;font-size:12px}
@@ -1289,9 +1294,43 @@ label.sel{display:flex;gap:6px;align-items:center;font-weight:600;margin-top:4px
 .steps li.done{color:var(--ok)}.steps li.todo,.steps li.skipped{color:var(--mute)}
 .prog-total{font-weight:700;text-align:right}.prog-total:empty{display:none}
 select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+/* navigation commune : rail à gauche sur PC, pilule d'icônes en bas sur téléphone */
+.rail{position:fixed;z-index:20;left:50%;transform:translateX(-50%);bottom:calc(.6rem + env(safe-area-inset-bottom));display:flex;gap:.2rem;padding:.35rem;
+  border-radius:9999px;background:color-mix(in srgb,var(--bg) 82%,transparent);border:1px solid var(--line);box-shadow:0 10px 30px var(--ombre);backdrop-filter:blur(14px)}
+.rail .marque{display:none}.rail a{display:flex;align-items:center;gap:.7rem;height:3rem;padding:0 1rem;border-radius:9999px;color:var(--mute);font-weight:600;text-decoration:none;white-space:nowrap}
+.rail a svg{width:1.45rem;height:1.45rem;flex:none}.rail a span.nom{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.rail a[aria-current=page]{background:var(--ink);color:var(--bg)}.rail .pastille{min-width:1.3rem;height:1.2rem;padding:0 .35rem;border-radius:9999px;background:var(--acc);color:var(--sur-acc);font-size:.7rem;font-weight:700;line-height:1.2rem;text-align:center}
+.contenu{padding-bottom:calc(5.5rem + env(safe-area-inset-bottom))}
+@media (min-width:900px){.rail{top:0;bottom:0;left:0;transform:none;width:13rem;flex-direction:column;gap:.25rem;padding:1.25rem .75rem;border-radius:0;border:0;border-right:1px solid var(--line);background:var(--bg);box-shadow:none;backdrop-filter:none}
+  .rail .marque{display:block;font-size:1.25rem;font-weight:300;letter-spacing:-.02em;padding:0 .85rem 1.1rem;color:var(--ink)}
+  .rail a{height:2.75rem;padding:0 .85rem}.rail a span.nom{position:static;width:auto;height:auto;clip:auto;flex:1}
+  .rail a[aria-current=page]{background:var(--card);color:var(--ink)}.contenu{margin-left:13rem;padding-bottom:2rem}}
+/* tuiles : une par motif, à la place du filtre déroulant */
+.tuiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem;flex-basis:100%}
+@media (min-width:700px){.tuiles{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (min-width:1200px){.tuiles{grid-template-columns:repeat(7,minmax(0,1fr))}}
+.tuile{display:grid;gap:.1rem;text-align:left;padding:.7rem .85rem;border-radius:12px;background:var(--card);border:1px solid var(--line);color:var(--ink);font-weight:500}
+.tuile:hover,.tuile[aria-pressed=true]{border-color:var(--acc)}.tuile[aria-pressed=true]{background:color-mix(in srgb,var(--acc) 14%,var(--card))}
+.tuile .chiffre{font-size:1.6rem;font-weight:300;letter-spacing:-.03em;line-height:1.1}.tuile .nom-tuile{font-size:.85rem;color:var(--mute)}.tuile.vide{background:transparent}.tuile.vide .chiffre{color:var(--mute)}
+#filtre{display:none}.vue{padding:16px 20px;max-width:60rem}.vue h1{flex-basis:auto;margin-bottom:.8rem}
+.bloc{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}.bloc h2{font-size:1.05rem;margin:0 0 .4rem}
+.bloc dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;margin:0}.bloc dt{color:var(--mute)}.bloc dd{margin:0}
+.voyant{display:inline-block;width:.6rem;height:.6rem;border-radius:9999px;background:var(--bord);margin-right:.4rem}.voyant.allume{background:var(--ok)}
+[hidden]{display:none!important}
+/* l'en-tête (outils et tuiles) ne reste collé en haut que sur grand écran : sur téléphone il masquerait les photos */
+.folder{scroll-margin-top:270px}
+@media (max-width:899px){header{position:static}.folder{scroll-margin-top:12px}}
 </style></head><body>
+<nav class="rail" aria-label="Sections">
+  <span class="marque">Dates de la Pellicule</span>
+  <a href="#a-traiter" data-vue="a-traiter" aria-label="À traiter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 5.6A1.6 1.6 0 0 1 7.8 4.5h8.4a1.6 1.6 0 0 1 1.6 1.1L20 13.5"/><path d="M4 13.5V18a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 18v-4.5h-4.6l-1.2 2.2h-4.4l-1.2-2.2z"/></svg><span class="nom">À traiter</span>{% if pending %}<span class="pastille">{{ pending|length if pending|length < 1000 else '999+' }}</span>{% endif %}</a>
+  <a href="#corrigees" data-vue="corrigees" aria-label="Corrigées"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.2 12.3 2.6 2.6 5-5.4"/></svg><span class="nom">Corrigées</span></a>
+  <a href="#connexion" data-vue="connexion" aria-label="Connexion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.6"/><circle cx="5" cy="6" r="1.8"/><circle cx="19" cy="6" r="1.8"/><circle cx="5" cy="18" r="1.8"/><circle cx="19" cy="18" r="1.8"/><path d="m6.4 7.2 3.6 3M17.6 7.2l-3.6 3M6.4 16.8l3.6-3M17.6 16.8l-3.6-3"/></svg><span class="nom">Connexion</span></a>
+  <a href="#reglages" data-vue="reglages" aria-label="Réglages"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7.5h6M15 7.5h4M5 16.5h3M12 16.5h7"/><circle cx="13" cy="7.5" r="2"/><circle cx="10" cy="16.5" r="2"/></svg><span class="nom">Réglages</span></a>
+</nav>
+<div class="contenu">
+<div id="vue-travail">
 <header>
-  <h1>Vérification des dates — Pellicule <span class="mute" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
+  <h1 id="titre-vue">À traiter</h1>
   <form id="scanform" method="post" action="{{ url_for('scan') }}" class="scanbtns">
   {% if state.running %}
     <button disabled>{{ 'Correction en cours…' if state.kind == 'correction' else 'Analyse en cours…' }}</button>
@@ -1313,6 +1352,15 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
     <option value="extension">Extension incorrecte</option>
     <option value="corrigees">Déjà corrigées ({{ corrected|length }})</option>
   </select>
+  <div class="tuiles" id="tuiles" role="group" aria-label="Motifs à traiter">
+    <button type="button" class="tuile" data-filtre="tous" aria-pressed="true"><span class="chiffre">{{ pending|length }}</span><span class="nom-tuile">Tout</span></button>
+    <button type="button" class="tuile{{ '' if counts['écart'] else ' vide' }}" data-filtre="écart" aria-pressed="false"><span class="chiffre">{{ counts['écart'] }}</span><span class="nom-tuile">Écarts de date</span></button>
+    <button type="button" class="tuile{{ '' if counts['sans date'] else ' vide' }}" data-filtre="sans date" aria-pressed="false"><span class="chiffre">{{ counts['sans date'] }}</span><span class="nom-tuile">Sans date</span></button>
+    <button type="button" class="tuile{{ '' if counts['à trancher'] else ' vide' }}" data-filtre="à trancher" aria-pressed="false"><span class="chiffre">{{ counts['à trancher'] }}</span><span class="nom-tuile">À trancher (nom ≠ dossier)</span></button>
+    <button type="button" class="tuile vide" data-filtre="incoherent" aria-pressed="false"><span class="chiffre" id="n-incoherent">0</span><span class="nom-tuile">Hors période des voisines</span></button>
+    <button type="button" class="tuile vide" data-filtre="extension" aria-pressed="false"><span class="chiffre" id="n-extension">0</span><span class="nom-tuile">Extension incorrecte</span></button>
+    <button type="button" class="tuile{{ '' if counts['abîmé'] else ' vide' }}" data-filtre="abîmé" aria-pressed="false"><span class="chiffre">{{ counts['abîmé'] }}</span><span class="nom-tuile">Fichiers abîmés</span></button>
+  </div>
   {% endif %}
   {% if pending %}
   <span class="actions">
@@ -1325,7 +1373,6 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
   {% if state.scanned_at %}Analyse du {{ state.scanned_at }} · {{ state.stats.fichiers }} fichiers ·
   {{ state.stats.ok }} OK · {{ state.stats.ecart }} écarts · {{ state.stats.sans_date }} sans date · {{ state.stats.a_trancher or 0 }} à trancher ·{% if state.stats.abime %} {{ state.stats.abime }} abîmé(s) ·{% endif %}
   {{ state.stats.sans_ref }} hors dossier daté · tolérance {{ tol }} j{% endif %}{% if corrected %} · {{ corrected|length }} corrigée(s){% endif %}{% if state.stats and state.stats.valide %} · {{ state.stats.valide }} validée(s) telles quelles{% endif %}</span>
-  <form method="post" action="{{ url_for('deconnexion') }}" style="margin-left:auto"><button class="sec">Se déconnecter</button></form>
 </header>
 <main>
 <div id="prog" class="msg prog" {% if not state.running %}hidden{% endif %}>
@@ -1431,6 +1478,32 @@ select{padding:7px;border-radius:8px;border:1px solid var(--line);background:var
 {% endfor %}
 </section>
 </main>
+</div>
+<section class="vue" id="vue-connexion" hidden>
+  <h1>Connexion</h1>
+  <div class="bloc"><h2><span class="voyant{{ ' allume' if dossier_present else '' }}"></span>La Pellicule</h2>
+    <dl><dt>Dossier analysé</dt><dd>{{ dossier }}{{ '' if dossier_present else ' (introuvable)' }}</dd>
+      <dt>Dernière analyse</dt><dd>{{ state.scanned_at or 'jamais' }}</dd>
+      {% if state.scanned_at %}<dt>Fichiers</dt><dd>{{ state.stats.fichiers }}, dont {{ state.stats.ok }} sans rien à signaler</dd>{% endif %}
+      <dt>Écriture</dt><dd>{{ 'lecture seule : aucun fichier n’est modifié' if lecture_seule else 'les dates sont écrites dans les fichiers, sur validation' }}</dd></dl></div>
+  <div class="bloc"><h2><span class="voyant{{ ' allume' if immich_configure else '' }}"></span>Immich</h2>
+    {% if immich_configure %}<p class="mute">L'outil lit dans Immich la date connue et les miniatures, et lui demande de relire les métadonnées après une correction. Il n'y écrit rien d'autre.</p>
+    {% if state.immich %}<p>{{ state.immich }}</p>{% endif %}
+    {% else %}<p class="mute">Non configuré (IMMICH_URL, IMMICH_API_KEY) : l'outil fonctionne sans, avec ses propres miniatures.</p>{% endif %}</div>
+</section>
+<section class="vue" id="vue-reglages" hidden>
+  <h1>Réglages</h1>
+  <div class="bloc"><h2>Règles</h2>
+    <dl><dt>Tolérance</dt><dd>{{ tol }} jour(s) entre la date de la photo et celle du dossier (TOLERANCE_DAYS)</dd>
+      <dt>Vidéos converties</dt><dd>{{ 'l’original est gardé à part (ORIGINALS_DIR)' if originals_dir else 'l’original est supprimé après vérification du MP4 (régler ORIGINALS_DIR pour le garder)' }}</dd>
+      <dt>Lecture seule</dt><dd>{{ 'oui (VERIF_LECTURE_SEULE)' if lecture_seule else 'non' }}</dd></dl></div>
+  <div class="bloc"><h2>Journal</h2>
+    <p class="mute">Chaque correction écrite, avec l'ancienne et la nouvelle date.</p>
+    <p><a class="btn sec" href="{{ url_for('journal') }}">Télécharger corrections.csv</a></p></div>
+  <div class="mute" style="display:flex;justify-content:space-between;align-items:center;gap:1rem"><span>version {{ version }}</span>
+    <form method="post" action="{{ url_for('deconnexion') }}"><button class="sec">Se déconnecter</button></form></div>
+</section>
+</div>
 <script>
 function visibles(){return [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none')}
 function cocher(v){visibles().forEach(c=>{const b=c.querySelector('input[type=checkbox]');if(b)b.checked=v})}
@@ -1530,6 +1603,26 @@ async function suivre(){
   } else if(wasRunning){location.replace('{{ url_for('index') }}')}
 }
 if(wasRunning)suivre();
+// 2.0.0 : les tuiles pilotent le filtre d'avant ; le rail montre une vue à la fois
+function compterTuiles(){const cartes=[...document.querySelectorAll('#f .card')];
+  const maj=(id,n)=>{const e=document.getElementById(id);if(!e)return;e.textContent=n;e.closest('.tuile').classList.toggle('vide',!n)};
+  maj('n-incoherent',cartes.filter(c=>c.dataset.coh==='0').length);maj('n-extension',cartes.filter(c=>c.dataset.ext==='1').length)}
+function tuileActive(f){document.querySelectorAll('#tuiles .tuile').forEach(t=>t.setAttribute('aria-pressed',t.dataset.filtre===f?'true':'false'))}
+let dernierFiltre='tous';
+document.querySelectorAll('#tuiles .tuile').forEach(t=>t.addEventListener('click',()=>{
+  const sel=document.getElementById('filtre');if(!sel)return;dernierFiltre=t.dataset.filtre;sel.value=dernierFiltre;filtrer();tuileActive(dernierFiltre)}));
+function vue(){let v=(location.hash||'#a-traiter').slice(1);if(!['a-traiter','corrigees','connexion','reglages'].includes(v))v='a-traiter';
+  document.querySelectorAll('.rail a').forEach(a=>{if(a.dataset.vue===v)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});
+  const travail=v==='a-traiter'||v==='corrigees';
+  document.getElementById('vue-travail').hidden=!travail;document.getElementById('vue-connexion').hidden=v!=='connexion';document.getElementById('vue-reglages').hidden=v!=='reglages';
+  if(!travail)return;
+  document.getElementById('titre-vue').textContent=v==='corrigees'?'Corrigées':'À traiter';
+  const sel=document.getElementById('filtre'),tuiles=document.getElementById('tuiles'),scan=document.getElementById('scanform');
+  if(tuiles)tuiles.hidden=v==='corrigees';if(scan)scan.hidden=v==='corrigees';
+  if(sel){sel.value=v==='corrigees'?'corrigees':dernierFiltre;filtrer();if(v!=='corrigees')tuileActive(dernierFiltre)}}
+window.addEventListener('hashchange',vue);
+try{const f1=document.getElementById('filtre');if(f1&&f1.value!=='corrigees')dernierFiltre=f1.value}catch(e){}
+compterTuiles();document.querySelectorAll('#f input[type=datetime-local]').forEach(i=>i.addEventListener('input',compterTuiles));vue();
 function confirmer(){
   const vides=[...document.querySelectorAll('input[name=sel]:checked:not(:disabled)')].filter(b=>!b.closest('.body').querySelector('input[type=datetime-local]').value).length;
   if(vides){alert(vides+' photo(s) à trancher cochée(s) sans date choisie.');return false}const n=document.querySelectorAll('input[name=sel]:checked:not(:disabled)').length;
@@ -1564,7 +1657,8 @@ def index():
                                   corrected=corrected, cgroups=list(cgroups.items()), counts=counts,
                                   tol=TOLERANCE_DAYS, messages=messages, version=__version__,
                                   has_cache=CACHE_FILE.exists(), originals_dir=bool(ORIGINALS_DIR),
-                                  lecture_seule=LECTURE_SEULE,
+                                  lecture_seule=LECTURE_SEULE, dossier=SCAN_DIR.name, dossier_present=SCAN_DIR.is_dir(),
+                                  immich_configure=immich_enabled(),
                                   a_realigner=0 if state["running"] else len(videos_a_realigner()))
 
 
