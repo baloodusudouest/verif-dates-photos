@@ -1,5 +1,8 @@
 # Journal des versions
 
+## 2.0.2 — 12 novembre 2026
+- Icône de l'appli (onglet du navigateur, écran d'accueil de l'iPhone) : la page d'un éphéméride. Le nom « Éphéméride » est aussi celui de l'icône sur l'iPhone.
+
 ## 2.0.1 — 12 novembre 2026
 - L'appli s'appelle maintenant **Éphéméride** (titre de la page, écran du mot de passe, rail). Rien d'autre ne change : le dépôt, l'image, le conteneur et les variables gardent leur nom technique.
 

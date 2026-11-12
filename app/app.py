@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 import calendar
 import shutil
@@ -143,6 +143,7 @@ ECHECS = {"n": 0}     # mots de passe faux à la suite : chaque essai attend un 
 PAGE_CONNEXION = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Éphéméride</title>
+<link rel="icon" href="/icone.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icone-180.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Éphéméride">
 <style>
 :root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--bad:#b91c1c;--acc:#2563eb}
 @media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
@@ -165,7 +166,7 @@ button{border:0;border-radius:8px;padding:10px 14px;background:var(--acc);color:
 @app.before_request
 def garde():
     """Rien ne répond sans session, sauf la page du mot de passe et le contrôle de santé."""
-    if request.endpoint in ("connexion", "sante"):
+    if request.endpoint in ("connexion", "sante", "icone"):
         return None
     if not PASSWORD:
         return "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).", 503
@@ -174,6 +175,18 @@ def garde():
     if request.method == "GET" and request.endpoint == "index":
         return redirect(url_for("connexion"))
     return {"ok": False, "msg": "Connexion nécessaire."}, 401
+
+
+ICONES = {"icone.svg": "image/svg+xml", "icone-180.png": "image/png", "icone-512.png": "image/png",
+          "manifest.webmanifest": "application/manifest+json"}
+
+
+@app.get("/<nom>")
+def icone(nom):
+    """Icône de l'appli et manifeste (2.0.2) : quatre fichiers fixes, servis sans session."""
+    if nom not in ICONES:
+        abort(404)
+    return send_file(Path(__file__).parent / nom, mimetype=ICONES[nom], max_age=86400)
 
 
 @app.get("/health")
@@ -1248,6 +1261,7 @@ def make_thumb(item, cache: Path):
 PAGE = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Éphéméride</title>
+<link rel="icon" href="/icone.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icone-180.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Éphéméride">
 <style>
 /* 2.0.0 : habillage commun aux applis (celui de carnet) : fonds neutres chauds, sombre par défaut,
    clair quand l'appareil le demande. Couleur de l'outil : bleu ardoise. Les noms des variables et
