@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 import calendar
 import shutil
@@ -145,8 +145,7 @@ PAGE_CONNEXION = """<!doctype html>
 <title>Éphéméride</title>
 <link rel="icon" href="/icone.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/icone-180.png"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Éphéméride">
 <style>
-:root{--bg:#f6f5f2;--card:#fff;--ink:#222;--mute:#777;--line:#e2e0db;--bad:#b91c1c;--acc:#2563eb}
-@media (prefers-color-scheme:dark){:root{--bg:#18181b;--card:#242428;--ink:#eee;--mute:#999;--line:#38383d;--acc:#60a5fa}}
+:root{color-scheme:dark;--bg:#151311;--card:#1f1c19;--ink:#f2ece2;--mute:#a89e91;--line:#312c27;--bad:#ef7b72;--acc:#7f9cc4}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
 form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;width:min(22rem,calc(100vw - 2rem));display:grid;gap:10px}
 h1{font-size:18px;margin:0}p{margin:0;color:var(--mute);font-size:13px}.ko{color:var(--bad);font-weight:600}
@@ -1283,8 +1282,6 @@ PAGE = """<!doctype html>
    des classes d'avant sont gardés : le script de la page et les gestes n'ont pas changé. */
 :root{color-scheme:dark;--bg:#151311;--card:#1f1c19;--ink:#f2ece2;--mute:#a89e91;--line:#312c27;--bord:#4b443c;
   --warn:#e39a4b;--bad:#ef7b72;--ok:#7fc493;--acc:#7f9cc4;--sur-acc:#10161f;--ombre:rgb(0 0 0 / .5)}
-@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#faf7f2;--card:#f1ece3;--ink:#1e1a16;--mute:#6f665b;--line:#e3dbcd;--bord:#cabfad;
-  --warn:#b45309;--bad:#c0392b;--ok:#2f7d4a;--acc:#3f5d86;--sur-acc:#ffffff;--ombre:rgb(30 30 40 / .16)}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Inter,system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
 header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 20px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 h1{font-size:1.9rem;font-weight:300;letter-spacing:-.03em;line-height:1.15;margin:0 12px 0 0;flex-basis:100%}main{padding:16px 20px;max-width:1400px}
