@@ -6,6 +6,7 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 ## État (11/11/2026)
 
+- **2.1.0** (13/11/2026) : connexion commune avec l'Anneau — cookie `maison_session` (accepté ; `Sessions.connecte`, `commun_valide` dans `app/auth.py`, ici `connexion_commune()` dans `app/app.py`). Jamais essayée sur la vraie installation.
 - **2.0.0 sur `main`** : habillage commun en bleu ardoise, rail, tuiles à la place du filtre, sections Connexion et Réglages. Serveur, adresses, règles et fichiers d'état inchangés.
 - 1.11.0 : mot de passe obligatoire, mode lecture seule.
 - Dossier « tel que construit » et écarts avec carnet : [`docs/dossier.md`](docs/dossier.md). Avis du conseil : [`docs/2.0-conseil.md`](docs/2.0-conseil.md).

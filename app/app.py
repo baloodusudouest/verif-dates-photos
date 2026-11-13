@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 
 import calendar
 import shutil
@@ -163,6 +163,19 @@ button{border:0;border-radius:8px;padding:10px 14px;background:var(--acc);color:
 </form></body></html>"""
 
 
+COMMUN = "maison_session"   # cookie commun aux applis de la maison, posé par l'Anneau
+
+
+def connexion_commune() -> bool:
+    """Le cookie posé par l'Anneau, signé avec le mot de passe commun : s'il est bon, pas besoin de se reconnecter.
+    Il vaut trente jours, ou jusqu'à ce que le mot de passe change."""
+    expire, _, signature = (request.cookies.get(COMMUN) or "").partition(".")
+    if not (PASSWORD and expire.isdigit() and int(expire) > dt.datetime.now().timestamp()):
+        return False
+    cle = hashlib.sha256(b"maison-session|" + PASSWORD.encode()).digest()
+    return hmac.compare_digest(signature, hmac.new(cle, expire.encode(), hashlib.sha256).hexdigest())
+
+
 @app.before_request
 def garde():
     """Rien ne répond sans session, sauf la page du mot de passe et le contrôle de santé."""
@@ -170,7 +183,7 @@ def garde():
         return None
     if not PASSWORD:
         return "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).", 503
-    if session.get("ok"):
+    if session.get("ok") or connexion_commune():
         return None
     if request.method == "GET" and request.endpoint == "index":
         return redirect(url_for("connexion"))
@@ -199,7 +212,7 @@ def connexion():
     if not PASSWORD:
         return "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD).", 503
     if request.method == "GET":
-        return redirect(url_for("index")) if session.get("ok") else render_template_string(PAGE_CONNEXION, erreur="")
+        return redirect(url_for("index")) if session.get("ok") or connexion_commune() else render_template_string(PAGE_CONNEXION, erreur="")
     time_sleep(min(5.0, 0.5 * ECHECS["n"]))
     if hmac.compare_digest(request.form.get("mot_de_passe", "").encode(), PASSWORD.encode()):
         ECHECS["n"] = 0
@@ -214,7 +227,9 @@ def connexion():
 @app.post("/deconnexion")
 def deconnexion():
     session.clear()
-    return redirect(url_for("connexion"))
+    reponse = redirect(url_for("connexion"))
+    reponse.delete_cookie(COMMUN)      # « Se déconnecter » ferme aussi la connexion commune
+    return reponse
 STATE = {
     "running": False,
     "progress": "",
