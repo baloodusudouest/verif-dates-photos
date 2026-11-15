@@ -32,7 +32,7 @@ Vérification des dates de la Pellicule avant migration vers le stockage Immich.
 - Journalise chaque correction dans <DATA_DIR>/corrections.csv
 - Demande à Immich de relire les métadonnées des assets corrigés (si l'API est configurée)
 """
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 import calendar
 import shutil
@@ -107,7 +107,28 @@ DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateD
 FMT = "%Y-%m-%d %H:%M:%S"
 
 app = Flask(__name__)
-LOCK = threading.Lock()
+LOCK = threading.Lock()      # état en mémoire (STATE, ITEMS, CORRECTED, VALIDATED)
+ECRITURE = threading.RLock()  # fichiers d'état et journal : une seule écriture à la fois
+
+
+def ecrire_json(path: Path, texte: str):
+    """Écrit un fichier d'état sans risque de le laisser à moitié écrit : fichier temporaire propre
+    au fil d'exécution, puis remplacement d'un coup. Une seule écriture à la fois (verrou ECRITURE)."""
+    with ECRITURE:
+        tmp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        tmp.write_text(texte, encoding="utf-8")
+        tmp.replace(path)
+
+
+def noter_journal(ligne):
+    """Ajoute une ligne à corrections.csv (en-tête si le fichier est neuf), une écriture à la fois."""
+    with ECRITURE:
+        neuf = not LOG_FILE.exists()
+        with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            if neuf:
+                w.writerow(["horodatage", "fichier", "ancienne_date", "source", "nouvelle_date", "statut", "detail"])
+            w.writerow(ligne)
 
 
 # --------------------------------------------------------------------------- accès (1.11.0)
@@ -471,7 +492,7 @@ def load_meta():
 
 def save_meta(meta):
     try:
-        META_FILE.write_text(json.dumps(meta), encoding="utf-8")
+        ecrire_json(META_FILE, json.dumps(meta))
     except OSError:
         pass
 
@@ -847,9 +868,9 @@ def load_validated():
 
 
 def save_validated():
-    tmp = VALIDATED_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(VALIDATED, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(VALIDATED_FILE)
+    with LOCK:   # copie figée : le dictionnaire peut changer pendant l'écriture
+        texte = json.dumps(VALIDATED, ensure_ascii=False)
+    ecrire_json(VALIDATED_FILE, texte)
 
 
 def propose_folder(folder: str, entries):
@@ -904,9 +925,9 @@ def load_corrected():
 
 
 def save_corrected():
-    tmp = CORRECTED_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(CORRECTED, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(CORRECTED_FILE)
+    with LOCK:
+        texte = json.dumps(CORRECTED, ensure_ascii=False)
+    ecrire_json(CORRECTED_FILE, texte)
 
 
 def cache_params():
@@ -926,9 +947,7 @@ def load_cache():
 
 
 def save_cache(files):
-    tmp = CACHE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"params": cache_params(), "files": files}, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(CACHE_FILE)
+    ecrire_json(CACHE_FILE, json.dumps({"params": cache_params(), "files": files}, ensure_ascii=False))
 
 
 def file_sig(path: Path):
@@ -1073,8 +1092,9 @@ def scan_worker(mode="tout"):
 
 def save_results():
     with LOCK:
-        data = {k: STATE.get(k) for k in ("items", "stats", "immich", "scanned_at", "folders")}
-    RESULTS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        texte = json.dumps({k: STATE.get(k) for k in ("items", "stats", "immich", "scanned_at", "folders")},
+                           ensure_ascii=False)
+    ecrire_json(RESULTS_FILE, texte)
 
 
 def load_results():
@@ -1206,13 +1226,8 @@ def verify(item, nd: dt.datetime):
 
 
 def log_correction(item, nd, ok, msg):
-    new = not LOG_FILE.exists()
-    with LOG_FILE.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, delimiter=";")
-        if new:
-            w.writerow(["horodatage", "fichier", "ancienne_date", "source", "nouvelle_date", "statut", "detail"])
-        w.writerow([dt.datetime.now().isoformat(timespec="seconds"), item["path"], item["date"],
-                    item["source"], nd.strftime("%d/%m/%Y %H:%M:%S"), "ok" if ok else "échec", msg])
+    noter_journal([dt.datetime.now().isoformat(timespec="seconds"), item["path"], item["date"],
+             item["source"], nd.strftime("%d/%m/%Y %H:%M:%S"), "ok" if ok else "échec", msg])
 
 
 def immich_refresh(asset_ids):
@@ -1897,14 +1912,12 @@ def realign_worker(paths):
             if r.returncode == 0 and a and b and abs((a - b).total_seconds()) <= 60:
                 ok_n += 1
                 faits.append(p)
-                with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-                    csv.writer(f, delimiter=";").writerow([dt.datetime.now().isoformat(timespec="seconds"), p, "",
-                                                           "CreationDate", a.strftime("%d/%m/%Y %H:%M:%S"), "ok",
-                                                           "réaligné sur CreationDate"])
+                noter_journal([dt.datetime.now().isoformat(timespec="seconds"), p, "", "CreationDate",
+                         a.strftime("%d/%m/%Y %H:%M:%S"), "ok", "réaligné sur CreationDate"])
             else:
                 ko.append(Path(p).name)
             set_progress(done=n)
-        REALIGNED_FILE.write_text(json.dumps(faits, ensure_ascii=False), encoding="utf-8")
+        ecrire_json(REALIGNED_FILE, json.dumps(faits, ensure_ascii=False))
         msg = f"{ok_n} vidéo(s) réalignée(s) sur leur date d'origine (CreationDate)."
         if ko:
             msg += f" {len(ko)} non réalignée(s) : " + ", ".join(ko[:10]) + ("…" if len(ko) > 10 else "")
@@ -2002,9 +2015,7 @@ def renommer():
                 store[q] = rec
     save_corrected()
     save_validated()
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        csv.writer(f, delimiter=";").writerow([dt.datetime.now().isoformat(timespec="seconds"), ancien, "", "dossier",
-                                               neuf, "ok", "dossier renommé"])
+    noter_journal([dt.datetime.now().isoformat(timespec="seconds"), ancien, "", "dossier", neuf, "ok", "dossier renommé"])
 
     def suite():
         scan_worker("nouveaux")

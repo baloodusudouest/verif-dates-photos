@@ -4,10 +4,11 @@ Nom d'appli depuis la 2.0.1 : **Éphéméride**. Noms techniques inchangés (`ve
 
 Fichier à lire en premier dans une nouvelle session, et à mettre à jour à chaque fin de session, dans le même commit que le code.
 
-## État (11/11/2026)
+## État (15/11/2026)
 
+- **2.1.2** (15/11/2026) : verrou d'écriture (`ECRITURE`, `ecrire_json`, `noter_journal` dans `app/app.py`) pour les fichiers d'état et le journal. Test `test_ecritures_simultanees`.
 - **2.1.1** (13/11/2026) : toujours sombre (blocs `prefers-color-scheme: light` retirés, variante `dark:` partout).
-- **2.1.0** (13/11/2026) : connexion commune avec l'Anneau — cookie `maison_session` (accepté ; `Sessions.connecte`, `commun_valide` dans `app/auth.py`, ici `connexion_commune()` dans `app/app.py`). Jamais essayée sur la vraie installation.
+- **2.1.0** (13/11/2026) : connexion commune avec l'Anneau — cookie `maison_session` (accepté ; `Sessions.connecte`, `commun_valide` dans `app/auth.py`, ici `connexion_commune()` dans `app/app.py`). Essayée par Julien le 15/11/2026.
 - **2.0.0 sur `main`** : habillage commun en bleu ardoise, rail, tuiles à la place du filtre, sections Connexion et Réglages. Serveur, adresses, règles et fichiers d'état inchangés.
 - 1.11.0 : mot de passe obligatoire, mode lecture seule.
 - Dossier « tel que construit » et écarts avec carnet : [`docs/dossier.md`](docs/dossier.md). Avis du conseil : [`docs/2.0-conseil.md`](docs/2.0-conseil.md).
@@ -15,9 +16,9 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 ## Prochaine étape
 
-1. Mise en service par Julien : `VERIF_PASSWORD` dans la stack (déjà dans `homelab.yml` du projet), un premier passage en `VERIF_LECTURE_SEULE=oui`. Retour arrière : `VERIF_DATES_VERSION=1.11.0`, ou `1.10.1` (sans mot de passe).
-2. Avant de migrer la Pellicule : sauvegarde vérifiée, puis un dossier témoin importé dans Immich pour contrôler que les dates corrigées y sont bien lues (fuseau des vidéos, MP4 convertis).
-3. Plus tard, puisque l'outil doit vivre : découpage du fichier unique en modules, puis FastAPI et Svelte, en deux livraisons séparées, après un essai sur une copie de quelques dossiers.
+Faits par Julien (15/11/2026) : mise en service 2.1.x et connexion commune avec l'Anneau essayées, vidéos de New York réalignées, sauvegarde vérifiée de la Pellicule, dossier témoin contrôlé dans Immich.
+
+1. Plus tard, puisque l'outil doit vivre : découpage du fichier unique en modules, puis FastAPI et Svelte, en deux livraisons séparées, après un essai sur une copie de quelques dossiers.
 
 ## Décisions tranchées
 
@@ -25,6 +26,7 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 - Les règles de dates et les fonctions d'écriture ne se réécrivent pas à l'occasion d'un changement d'interface.
 - Pas de bouton « remettre l'ancienne date » : `corrections.csv` et la sauvegarde suffisent (avis du conseil).
 - Rien de personnel dans le dépôt public.
+- Toute écriture d'un fichier d'état ou du journal passe par `ecrire_json` / `noter_journal` (verrou `ECRITURE`) ; `journal` est le nom de la route `/journal.csv`, ne pas le réutiliser.
 
 ## Pièges
 

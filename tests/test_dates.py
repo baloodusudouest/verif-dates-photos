@@ -544,3 +544,38 @@ def test_111_lecture_seule_aucun_fichier_ne_bouge(app, monkeypatch):
         with pytest.raises(app.LectureSeule):
             ecrire()
     assert _empreintes(app.SCAN_DIR) == avant and dossier.is_dir()
+
+
+def test_ecritures_simultanees(app):
+    """Plusieurs écritures en même temps (corrections, validation, journal) ne doivent ni planter
+    ni laisser un fichier d'état illisible ou une ligne de journal perdue."""
+    import json as _json
+    import threading as _th
+    erreurs = []
+
+    def modifie(base):
+        try:
+            for i in range(300):
+                with app.LOCK:
+                    app.CORRECTED[f"/x/{base}-{i}.jpg"] = {"id": f"{base}{i}", "path": f"/x/{base}-{i}.jpg"}
+                app.save_corrected()
+        except Exception as exc:   # « dictionary changed size during iteration », fichier .tmp disputé…
+            erreurs.append(repr(exc))
+
+    def note(base):
+        try:
+            for i in range(200):
+                app.noter_journal(["t", f"/x/{base}-{i}.jpg", "", "", "", "ok", "essai"])
+        except Exception as exc:
+            erreurs.append(repr(exc))
+
+    fils = [_th.Thread(target=modifie, args=(b,)) for b in "abcd"] + [_th.Thread(target=note, args=(b,)) for b in "efgh"]
+    for f in fils:
+        f.start()
+    for f in fils:
+        f.join()
+    assert erreurs == []
+    assert len(_json.loads(app.CORRECTED_FILE.read_text(encoding="utf-8"))) == 4 * 300
+    lignes = app.LOG_FILE.read_text(encoding="utf-8").splitlines()
+    assert lignes[0].startswith("horodatage;") and len(lignes) == 1 + 4 * 200
+    assert not list(app.DATA_DIR.glob(".*.tmp"))          # aucun fichier temporaire oublié

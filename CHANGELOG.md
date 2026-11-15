@@ -1,5 +1,8 @@
 # Journal des versions
 
+## 2.1.2 — 15 novembre 2026
+- **Verrou d'écriture** (recommandé par le conseil). Les fichiers d'état (`results.json`, `cache.json`, `corrigees.json`, `validees.json`, `mesures.json`, `videos-realignees.json`) et le journal `corrections.csv` ne sont plus écrits que par une action à la fois, chaque fichier d'état passant par un fichier temporaire remplacé d'un coup. Avant, deux actions simultanées (par exemple « Les dates des photos sont bonnes » pendant une correction) pouvaient faire échouer l'enregistrement ou laisser un fichier à moitié écrit. Rien ne change dans les règles de dates ni dans les écritures des photos.
+
 ## 2.1.1 — 13 novembre 2026
 - **Toujours sombre.** Le thème clair est retiré : l'appli est sombre partout, ouverte seule comme dans l'Anneau, quel que soit le réglage du téléphone.
 
