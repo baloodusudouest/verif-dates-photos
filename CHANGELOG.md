@@ -1,5 +1,8 @@
 # Journal des versions
 
+## 2.2.0 — 15 novembre 2026
+- **Le fichier unique est découpé en modules**, sans changer une règle ni une écriture : `reglages` (variables et chemins), `etat` (état, verrous, fichiers d'état, journal), `dates` (règles de dates, aucune écriture), `exif` (lecture et écriture dans les fichiers, réparations), `immich`, `analyse`, `actions` (corrections, réalignement) et `web` (page et adresses, toujours Flask). Le découpage a été fait par un script : chaque fonction est recopiée telle quelle, seules les références d'un module à l'autre sont réécrites. Les 34 tests passent sans qu'une seule attente ait changé. Première des deux livraisons vers FastAPI et Svelte.
+
 ## 2.1.2 — 15 novembre 2026
 - **Verrou d'écriture** (recommandé par le conseil). Les fichiers d'état (`results.json`, `cache.json`, `corrigees.json`, `validees.json`, `mesures.json`, `videos-realignees.json`) et le journal `corrections.csv` ne sont plus écrits que par une action à la fois, chaque fichier d'état passant par un fichier temporaire remplacé d'un coup. Avant, deux actions simultanées (par exemple « Les dates des photos sont bonnes » pendant une correction) pouvaient faire échouer l'enregistrement ou laisser un fichier à moitié écrit. Rien ne change dans les règles de dates ni dans les écritures des photos.
 

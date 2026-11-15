@@ -1,6 +1,5 @@
 """Tests de la logique de dates et d'un passage complet analyse → correction (exiftool requis)."""
 import datetime as dt
-import importlib
 import shutil
 import subprocess
 import sys
@@ -9,7 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from outil import charger  # noqa: E402
 
 
 MDP = "essai"
@@ -24,8 +24,7 @@ def app(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("VERIF_PASSWORD", MDP)
     monkeypatch.delenv("VERIF_LECTURE_SEULE", raising=False)
-    import app as module
-    module = importlib.reload(module)
+    module = charger()
 
     # 1.11.0 : l'outil a un mot de passe. Le client de test ouvre la session en naissant, pour que
     # les tests d'avant gardent leurs gestes et leurs attentes tels quels.

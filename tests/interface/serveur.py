@@ -16,8 +16,10 @@ os.environ.update({"LOCAL_ROOT": str(dossier / "photos"), "DATA_DIR": str(dossie
                    "VERIF_PASSWORD": "essai", "PORT": str(port)})
 for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT", "VERIF_LECTURE_SEULE"):
     os.environ.pop(k, None)
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "app"))
-import app as outil  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from outil import charger  # noqa: E402
+
+outil = charger(recharger=False)
 
 
 def photo(chemin: Path, date: str | None, couleur: str) -> None:

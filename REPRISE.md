@@ -6,9 +6,10 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 ## État (15/11/2026)
 
-- **2.1.2** (15/11/2026) : verrou d'écriture (`ECRITURE`, `ecrire_json`, `noter_journal` dans `app/app.py`) pour les fichiers d'état et le journal. Test `test_ecritures_simultanees`.
+- **2.2.0** (15/11/2026) : `app/app.py` découpé en modules (`app/reglages.py`, `etat.py`, `dates.py`, `exif.py`, `immich.py`, `analyse.py`, `actions.py`, `web.py`), version dans `app/__init__.py`. Lancement : `python -m app.web`. Les modules s'appellent **par le module** (`X.write_date`, `R.DATA_DIR`), jamais par `from … import nom` : c'est ce qui permet aux tests (`tests/outil.py`) et au rechargement de remplacer un nom partout.
+- **2.1.2** (15/11/2026) : verrou d'écriture (`ECRITURE`, `ecrire_json`, `noter_journal` dans `app/etat.py`) pour les fichiers d'état et le journal. Test `test_ecritures_simultanees`.
 - **2.1.1** (13/11/2026) : toujours sombre (blocs `prefers-color-scheme: light` retirés, variante `dark:` partout).
-- **2.1.0** (13/11/2026) : connexion commune avec l'Anneau — cookie `maison_session` (accepté ; `Sessions.connecte`, `commun_valide` dans `app/auth.py`, ici `connexion_commune()` dans `app/app.py`). Essayée par Julien le 15/11/2026.
+- **2.1.0** (13/11/2026) : connexion commune avec l'Anneau — cookie `maison_session` (accepté ; `Sessions.connecte`, `commun_valide` dans `app/auth.py`, ici `connexion_commune()` dans `app/web.py`). Essayée par Julien le 15/11/2026.
 - **2.0.0 sur `main`** : habillage commun en bleu ardoise, rail, tuiles à la place du filtre, sections Connexion et Réglages. Serveur, adresses, règles et fichiers d'état inchangés.
 - 1.11.0 : mot de passe obligatoire, mode lecture seule.
 - Dossier « tel que construit » et écarts avec carnet : [`docs/dossier.md`](docs/dossier.md). Avis du conseil : [`docs/2.0-conseil.md`](docs/2.0-conseil.md).
@@ -18,7 +19,7 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 Faits par Julien (15/11/2026) : mise en service 2.1.x et connexion commune avec l'Anneau essayées, vidéos de New York réalignées, sauvegarde vérifiée de la Pellicule, dossier témoin contrôlé dans Immich.
 
-1. Plus tard, puisque l'outil doit vivre : découpage du fichier unique en modules, puis FastAPI et Svelte, en deux livraisons séparées, après un essai sur une copie de quelques dossiers.
+1. 3.0.0 : FastAPI et Svelte à la place de Flask et de la page dans `web.py` ; les autres modules ne changent pas.
 
 ## Décisions tranchées
 
@@ -30,7 +31,7 @@ Faits par Julien (15/11/2026) : mise en service 2.1.x et connexion commune avec 
 
 ## Pièges
 
-- 2.0 : la page reste un modèle dans `app/app.py`. Le script s'appuie sur des identifiants et des classes (`#filtre`, `#f`, `.card`, `[data-folder]`, `.actions`, `#corrigees`) : le menu `#filtre` existe toujours, caché, et les tuiles le pilotent. Ne pas les renommer.
+- 2.0 : la page reste un modèle dans `app/web.py`. Le script s'appuie sur des identifiants et des classes (`#filtre`, `#f`, `.card`, `[data-folder]`, `.actions`, `#corrigees`) : le menu `#filtre` existe toujours, caché, et les tuiles le pilotent. Ne pas les renommer.
 - Les tests d'écran (`tests/interface/`) créent de vrais fichiers et ont besoin d'exiftool et de Playwright ; ils ne tournent pas dans l'image sur GitHub (ils y sont sautés).
 - Les tests ont besoin d'exiftool et de ffmpeg ; sans exiftool, la plupart sont sautés sans bruit. Sur GitHub ils tournent dans l'image.
 - Le client de test ouvre la session tout seul (`tests/test_dates.py`, fixture `app`) : un test qui veut un visiteur sans session crée un `FlaskClient` nu.

@@ -23,7 +23,7 @@ jobs:
 
       - name: Version
         id: v
-        run: echo "version=$(grep -oP '__version__ = \"\K[^\"]+' app/app.py)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(grep -oP '__version__ = \"\K[^\"]+' app/__init__.py)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 

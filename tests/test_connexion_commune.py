@@ -1,14 +1,14 @@
 """2.1.0 : le cookie commun posé par l'Anneau ouvre l'appli si le mot de passe est le même."""
 import hashlib
 import hmac
-import importlib
 import sys
 import time
 from pathlib import Path
 
 from flask.testing import FlaskClient
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from outil import charger  # noqa: E402
 MDP = "mot-de-passe-essai"
 
 
@@ -21,8 +21,7 @@ def test_connexion_commune(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("VERIF_PASSWORD", MDP)
-    import app as module
-    module = importlib.reload(module)
+    module = charger()
     dans_une_heure = int(time.time()) + 3600
 
     def etat(valeur):
