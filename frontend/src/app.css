@@ -1,0 +1,120 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn-svelte/tailwind.css";
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Thème du socle : minimalisme chaleureux (neutres teintés, ceux de carnet), toujours sombre.
+   UNE SEULE LIGNE À CHANGER PAR APPLI : la couleur --app (et --app-contraste, le texte posé dessus).
+   Couleurs déjà prises : docs/format.md, § 1.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Toujours sombre : « dark: » s'applique partout (comme l'Anneau) */
+@custom-variant dark {
+  @media all {
+    @slot;
+  }
+}
+
+:root {
+  color-scheme: dark;
+  --app: #7f9cc4;                         /* Éphéméride : bleu ardoise */
+  --app-contraste: #10161f;               /* texte posé sur le bleu ardoise */
+
+  --radius: 0.75rem;
+  --background: #151311;
+  --foreground: #f2ece2;
+  --card: #1f1c19;
+  --card-foreground: var(--foreground);
+  --popover: #25211d;
+  --popover-foreground: var(--foreground);
+  --primary: var(--app);
+  --primary-foreground: var(--app-contraste);
+  --secondary: #2a2521;
+  --secondary-foreground: var(--foreground);
+  --muted: #2a2521;
+  --muted-foreground: #a89e91;
+  --accent: #2a2521;
+  --accent-foreground: var(--foreground);
+  --destructive: oklch(0.72 0.18 22);
+  --border: oklch(1 0 0 / 0.1);
+  --input: oklch(1 0 0 / 0.16);
+  --ring: var(--app);
+  --valide: oklch(0.78 0.14 155);
+  --chart-1: var(--app);
+}
+
+
+@theme inline {
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-valide: var(--valide);
+  --color-chart-1: var(--chart-1);
+}
+
+@layer base {
+  * { border-color: var(--border); }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-wrap: anywhere;   /* un long chemin (message du journal) ne doit jamais élargir la page sur iPhone */
+    font-feature-settings: "cv11", "ss01";
+  }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  button { cursor: pointer; }
+  /* Animation sobre : rien ne bouge si l'appareil demande de réduire les animations */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  }
+}
+
+@layer components {
+  /* Titre d'écran : grand, fin, serré. C'est la signature typographique du socle. */
+  .titre { font-size: 2rem; line-height: 1.1; font-weight: 300; letter-spacing: -0.035em; }
+  .etiquette { font-size: 0.72rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted-foreground); }
+  .chiffre { font-weight: 300; letter-spacing: -0.04em; line-height: 1; font-variant-numeric: tabular-nums; }
+}
+
+/* ─────────────── Éphéméride ─────────────── */
+:root {
+  --ecart: #e39a4b;      /* écart de date */
+  --sans: #ef7b72;       /* sans date, échecs */
+}
+@layer components {
+  .tag { display: inline-block; border-radius: 0.35rem; padding: 0 0.4rem; font-size: 0.75rem; font-weight: 600; color: var(--background); }
+  .t-ecart { background: var(--ecart); }
+  .t-sans { background: var(--sans); }
+  .t-abime { background: var(--muted-foreground); }
+  .t-trancher { background: var(--app); }
+  .t-ok { background: var(--valide); }
+  .champ { border: 1px solid var(--input); border-radius: 0.5rem; background: var(--background); color: var(--foreground); padding: 0.3rem 0.5rem; }
+  .ko { color: var(--sans); }
+  .attention { color: var(--ecart); }
+}

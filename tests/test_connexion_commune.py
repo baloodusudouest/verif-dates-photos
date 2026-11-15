@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from flask.testing import FlaskClient
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from outil import charger  # noqa: E402
@@ -25,19 +25,21 @@ def test_connexion_commune(tmp_path, monkeypatch):
     dans_une_heure = int(time.time()) + 3600
 
     def etat(valeur):
-        c = FlaskClient(module.app)
+        c = TestClient(module.app)
         if valeur is not None:
-            c.set_cookie("maison_session", valeur)
-        return c.get("/").status_code
+            c.cookies.set("maison_session", valeur)
+        return c.get("/api/etat").status_code
 
-    assert etat(None) == 302                                         # renvoi vers la page du mot de passe
+    assert etat(None) == 401
     assert etat(cookie(MDP, dans_une_heure)) == 200
-    assert etat(cookie("un-autre-mot-de-passe", dans_une_heure)) == 302
-    assert etat(cookie(MDP, int(time.time()) - 5)) == 302
+    assert etat(cookie("un-autre-mot-de-passe", dans_une_heure)) == 401
+    assert etat(cookie(MDP, int(time.time()) - 5)) == 401
     for faux in ("", ".", "abc", "123.", "1.2.3"):
-        assert etat(faux) == 302
-    c = FlaskClient(module.app)
-    c.set_cookie("maison_session", cookie(MDP, dans_une_heure))
-    assert c.get("/connexion").status_code == 302                    # déjà connecté : pas de page de mot de passe
-    c.post("/deconnexion")
-    assert c.get("/api/state").status_code == 401                    # « Se déconnecter » retire le cookie commun
+        assert etat(faux) == 401
+    c = TestClient(module.app)
+    c.cookies.set("maison_session", cookie(MDP, dans_une_heure))
+    assert c.get("/api/session").json()["connecte"] is True          # déjà connecté : pas d'écran de mot de passe
+    r = c.post("/api/deconnexion")
+    assert 'maison_session=""' in r.headers.get("set-cookie", "")    # « Se déconnecter » retire le cookie commun
+    c.cookies.clear()
+    assert c.get("/api/etat").status_code == 401

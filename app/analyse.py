@@ -42,7 +42,7 @@ def analyse_record(rec, immich_idx, stats):
     erreur = rec.get("Error") or ""
     fte = (rec.get("FileTypeExtension") or "").lower()
     vrai_ext = fte if (fte and fte in R.ALL_EXT and not X.same_ext(fte, path.suffix.lstrip("."))) else ""
-    if fte and fte not in R.ALL_EXT and not erreur:
+    if fte and fte not in R.ALL_EXT and not X.same_ext(fte, path.suffix.lstrip(".")) and not erreur:
         erreur = f"le contenu n'est pas une photo ni une vidéo ({fte.upper()})"
         fte = ""
     if erreur and not fte:

@@ -1,4 +1,4 @@
-"""Tests d'écran (2.0.0) : la page rhabillée garde ses gestes. Sur PC et sur téléphone, avec une
+"""Tests d'écran (2.0.0, repris en 3.0.0 pour l'interface Svelte) : l'interface garde ses gestes. Sur PC et sur téléphone, avec une
 petite Pellicule de vrais fichiers. Le parcours qui compte : corriger un dossier, puis vérifier
 que la date est bien dans le fichier."""
 import re
@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 playwright = pytest.importorskip("playwright.sync_api")
-pytestmark = pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
 RACINE = Path(__file__).resolve().parents[2]
+pytestmark = [pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent"),
+              pytest.mark.skipif(not (RACINE / "app" / "static" / "index.html").exists(), reason="interface non compilée")]
 
 
 @pytest.fixture(params=["pc", "telephone"])
@@ -89,6 +90,32 @@ def test_20_corriger_un_dossier_ecrit_la_date_dans_le_fichier(page):
             break
         time.sleep(0.25)
     assert lire() == "2019:07:14 16:15:00"
-    page.goto(page.url.split("#")[0] + "#corrigees")
+    # le message du journal (long chemin) ne doit pas élargir la page sur iPhone
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+    page.locator("nav.rail a[aria-label='Corrigées']").click()
+    page.locator("#corrigees .card", has_text="IMG_20190714_161500.jpg").wait_for()
+    page.goto(page.url.split("#")[0] + "#corrigees")                                  # l'adresse garde la section
     page.reload()
     page.locator("#corrigees .card", has_text="IMG_20190714_161500.jpg").wait_for()
+
+
+def test_30_choix_coherence_filtre_et_validation(page):
+    """3.0.0 : les gestes de la carte et du dossier, sans écrire de date."""
+    carte = page.locator("#f .card", has_text="IMG_20110502_101010.jpg")              # à trancher : nom ≠ dossier
+    carte.get_by_role("button", name=re.compile(r"^Nom \(")).click()
+    assert carte.get_by_role("checkbox").is_checked()                                  # choisir coche la photo
+    assert "hors de la période des autres photos" in carte.inner_text()                # 2011 dans un dossier de 2008
+    page.locator("#tuiles .tuile", has_text="Hors période des voisines").click()
+    assert page.locator("#f .card").count() == 1
+    page.reload()                                                                      # le filtre est gardé…
+    page.wait_for_selector("#tuiles")
+    assert page.locator("#tuiles .tuile[aria-pressed='true']").inner_text().endswith("Hors période des voisines")
+    assert page.locator("#f .card").count() == 0                                       # …mais pas le choix non envoyé
+    page.locator("#tuiles .tuile", has_text="Tout").click()
+    plage = page.locator("[data-folder][data-nom='2008/2008-08-10 Plage']")
+    plage.get_by_role("button", name="Les dates des photos sont bonnes").click()        # confirmation acceptée
+    page.locator("[data-folder][data-nom='2008/2008-08-10 Plage']").wait_for(state="detached")
+    page.locator("nav.rail a[aria-label='Corrigées']").click()
+    page.locator("#corrigees .card").first.wait_for()
+    assert page.locator("#corrigees .card").count() == 2                               # validées sans modification
+    assert "dates validées telles quelles" in page.locator("#corrigees").inner_text()

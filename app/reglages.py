@@ -44,7 +44,7 @@ READ_TAGS = ["-DateTimeOriginal", "-CreationDate", "-CreateDate", "-MediaCreateD
 
 
 # extensions équivalentes : pas d'alerte si le contenu est de l'une et le nom de l'autre
-EXT_EQUIV = [{"jpg", "jpeg"}, {"tif", "tiff"}, {"heic", "heif"}, {"mts", "m2ts"},
+EXT_EQUIV = [{"jpg", "jpeg"}, {"tif", "tiff"}, {"heic", "heif"}, {"mts", "m2ts", "m2t", "ts"},
              {"mov", "mp4", "m4v", "3gp", "qt"}]
 CLEANED_DIR = DATA_DIR / "originaux-nettoyes"   # JPEG d'origine avant retrait des octets parasites
 DOUBLONS_DIR = DATA_DIR / "doublons"   # fichiers mal nommés identiques à un fichier déjà présent

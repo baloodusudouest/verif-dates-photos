@@ -78,7 +78,7 @@ Elle affiche aussi le temps restant au total.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `VERIF_PASSWORD` | — (**obligatoire**) | Mot de passe de la page. Sans lui, l'outil ne démarre pas |
+| `VERIF_PASSWORD` | — (**obligatoire**) | Mot de passe de la page. Sans lui, rien ne s'ouvre (l'API répond 503) |
 | `VERIF_LECTURE_SEULE` | — | `oui` : l'outil analyse et propose, mais ne modifie, ne déplace et ne supprime aucun fichier |
 | `LOCAL_ROOT` | `/photos` | Dossier racine des photos dans le conteneur |
 | `SCAN_SUBDIR` | `Pellicule` | Sous-dossier à analyser |
@@ -110,8 +110,12 @@ Le retour à une version précédente ramène le code, pas les fichiers : une vi
 ## Développement
 
 ```bash
-pip install -r requirements-dev.txt   # exiftool doit aussi être installé
-python -m pytest -q
+pip install -r requirements-dev.txt   # exiftool et ffmpeg doivent aussi être installés
+cd frontend && npm ci && npx vite build && cd ..   # interface Svelte → app/static
+python -m pytest -q                   # tests de l'outil ; tests d'écran si Playwright est installé
+VERIF_PASSWORD=essai DATA_DIR=./data LOCAL_ROOT=./photos uvicorn app.main:app --port 8099
 ```
+
+Serveur FastAPI (`app/main.py`), interface Svelte 5 + Tailwind 4 (`frontend/`), format commun du socle.
 
 L'image est construite par GitHub Actions et publiée sur GHCR avec les étiquettes `latest`, `<version>` et `sha-<commit>`.

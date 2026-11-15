@@ -101,7 +101,7 @@ Fait : versions 1.0 à 1.10.1 (novembre 2026). Proposé : voir plus bas.
 | **2.0.0** | Découpage en modules sans changer une règle (4), FastAPI et Svelte (3), habillage bleu ardoise (5), quatre entrées et tuiles (6, 7), tests d'écran (10) | Les 17 tests passent sans modification de leurs attentes ; mêmes fichiers d'état ; un jour en lecture seule ; retour par `VERIF_DATES_VERSION=1.11.0` |
 | **2.1.0** | Remettre l'ancienne date (9) | Test : corriger puis remettre rend le fichier identique, date pour date |
 
-**Tranché par Julien le 11/11/2026, après le conseil** : l'outil continuera de servir après la migration ; voie médiane (habillage et navigation sur le serveur actuel) ; pas de corbeille par défaut ; pas de « remettre l'ancienne date ». Faits : écarts 1 et 2 (1.11.0), 5, 6 et 10 (2.0.0, sans changer de serveur), 11 et 12. Restent pour plus tard, puisque l'outil doit vivre : 3 et 4 (modules, puis FastAPI et Svelte), en livraisons séparées.
+**Tranché par Julien le 11/11/2026, après le conseil** : l'outil continuera de servir après la migration ; voie médiane (habillage et navigation sur le serveur actuel) ; pas de corbeille par défaut ; pas de « remettre l'ancienne date ». Faits : écarts 1 et 2 (1.11.0), 5, 6 et 10 (2.0.0, sans changer de serveur), 11 et 12. Restaient 3 et 4, faits en deux livraisons le 15/11/2026 : 2.2.0 (modules) puis 3.0.0 (FastAPI et Svelte, retour par l'étiquette `:2.2.0`).
 
 Questions posées avant :
 1. Réécrire l'interface (2.0.0) alors que l'outil sert jusqu'à la migration seulement, ou s'arrêter à la 1.11.0 et rhabiller la page existante.

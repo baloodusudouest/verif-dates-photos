@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ORDRE = ["reglages", "etat", "dates", "exif", "immich", "analyse", "actions", "web"]
+ORDRE = ["reglages", "etat", "dates", "exif", "immich", "analyse", "actions", "auth", "main"]
 
 
 class Outil:

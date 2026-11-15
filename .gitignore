@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 data/
 .pytest_cache/
+frontend/node_modules/
+app/static/

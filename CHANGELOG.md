@@ -1,5 +1,17 @@
 # Journal des versions
 
+## 3.0.0 — 15 novembre 2026
+**Format commun du socle : FastAPI pour le serveur, Svelte 5 et Tailwind 4 pour l'interface.** Deuxième des deux livraisons choisies par Julien. Les règles de dates, les écritures dans les fichiers et les fichiers d'état sont ceux de la 2.2.0 : les modules `dates`, `exif`, `analyse` et `etat` n'ont pas changé, et ce que faisaient les adresses Flask (lancer une analyse, corriger, réaligner, valider ou renommer un dossier) est passé tel quel dans `actions.py`.
+- **Serveur FastAPI** (`app/main.py`) lancé par Uvicorn ; Flask et `app/web.py` sont retirés. Adresses : `/api/etat`, `/api/progression`, `/api/analyse`, `/api/corriger`, `/api/realigner`, `/api/valider`, `/api/renommer`, `/api/miniature/…`, `/api/journal.csv`. Publiques : `/health`, les icônes, `/api/session`, `/api/connexion`.
+- **Connexion** par la classe `Sessions` du socle (cookie `verif_dates_session`, trente jours ; une seconde d'attente, cinq après cinq essais faux en cinq minutes) ; le cookie commun `maison_session` de l'Anneau ouvre toujours l'appli. « Se déconnecter » ferme toutes les sessions ouvertes avant. **Il faudra se reconnecter une fois** (ou passer par l'Anneau) : l'ancien cookie Flask ne vaut plus.
+- **Interface Svelte** : mêmes sections (À traiter, Corrigées, Connexion, Réglages), mêmes tuiles, mêmes gestes et mêmes confirmations qu'en 2.x (date du nom, voisines, date du dossier, dates proposées, même jour pour toutes, cocher, corriger ce dossier, « les dates des photos sont bonnes », renommer, réaligner), dossier replié puis passage au suivant, filtre gardé d'une visite à l'autre. Les anciennes adresses de section (`#corrigees`…) restent valables.
+- **`/health`** donne aussi le nombre de photos à traiter et si une tâche tourne, sans aucun nom de fichier ni de dossier, pour la tuile de l'Anneau.
+- **Correction** : un `.mts` en flux MPEG-TS simple était pris pour un fichier abîmé (« le contenu n'est pas une photo ni une vidéo (M2T) ») et n'avait donc pas de case « Corriger ». Il est maintenant reconnu comme vidéo à convertir en MP4. Trouvé en réécrivant le test de conversion.
+- **Sur iPhone**, un long mot (le chemin du journal dans le message de fin de correction) ne peut plus élargir la page.
+- Image : une étape Node compile l'interface ; l'outil tourne toujours en root (il garde le propriétaire des photos).
+- Tests : les 28 tests de l'outil passent, leurs attentes sur la page HTML étant réécrites en attentes sur `/api/etat` ; 6 tests d'écran sur PC et iPhone (dont corriger un dossier puis relire la date dans le fichier, et choisir une date à trancher, filtrer, valider un dossier). Sur GitHub, l'image démarre et sert l'interface avant d'être publiée.
+- Retour arrière : étiquette `:2.2.0` à la place de `:latest` dans la stack (mêmes fichiers d'état).
+
 ## 2.2.0 — 15 novembre 2026
 - **Le fichier unique est découpé en modules**, sans changer une règle ni une écriture : `reglages` (variables et chemins), `etat` (état, verrous, fichiers d'état, journal), `dates` (règles de dates, aucune écriture), `exif` (lecture et écriture dans les fichiers, réparations), `immich`, `analyse`, `actions` (corrections, réalignement) et `web` (page et adresses, toujours Flask). Le découpage a été fait par un script : chaque fonction est recopiée telle quelle, seules les références d'un module à l'autre sont réécrites. Les 34 tests passent sans qu'une seule attente ait changé. Première des deux livraisons vers FastAPI et Svelte.
 

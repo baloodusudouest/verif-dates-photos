@@ -1,5 +1,5 @@
-"""Vérification des dates de démonstration, pour les tests d'écran : une petite Pellicule créée
-pour l'occasion (vrais fichiers, exiftool réel), déjà analysée.
+"""Éphéméride de démonstration, pour les tests d'écran : une petite Pellicule créée
+pour l'occasion (vrais fichiers, exiftool réel), déjà analysée. Il faut l'interface compilée (cd frontend && npx vite build).
 
     python tests/interface/serveur.py <dossier> <port>
 
@@ -41,4 +41,5 @@ photo(P / "2008" / "2008-08-10 Plage" / "b.jpg", "2008:08:10 09:30:00", "#8ac8c0
 photo(P / "2008" / "2008-08-10 Plage" / "c.jpg", "2012:01:01 08:00:00", "#b08ac8")    # écart
 outil.scan_worker()
 (dossier / "pret").write_text("ok")
-outil.app.run(host="127.0.0.1", port=port, threaded=True)
+import uvicorn  # noqa: E402
+uvicorn.run(outil.app, host="127.0.0.1", port=port, log_level="warning")

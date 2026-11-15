@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from outil import charger  # noqa: E402
@@ -25,18 +26,31 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("VERIF_PASSWORD", MDP)
     monkeypatch.delenv("VERIF_LECTURE_SEULE", raising=False)
     module = charger()
+    module.ETAT["attente"] = False      # pas d'attente d'une seconde après chaque connexion
 
-    # 1.11.0 : l'outil a un mot de passe. Le client de test ouvre la session en naissant, pour que
-    # les tests d'avant gardent leurs gestes et leurs attentes tels quels.
-    from flask.testing import FlaskClient
+    # 3.0.0 : l'API FastAPI. Le client de test ouvre la session en naissant, comme avant.
+    def client_connecte():
+        c = TestClient(module.app)
+        assert c.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 200
+        return c
 
-    class ClientConnecte(FlaskClient):
-        def __init__(self, *a, **k):
-            super().__init__(*a, **k)
-            assert self.post("/connexion", data={"mot_de_passe": MDP}).status_code == 302
-
-    module.app.test_client_class = ClientConnecte
+    module.app.test_client = client_connecte
     return module
+
+
+def etat(client):
+    r = client.get("/api/etat")
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def photo(e, nom):
+    return next(p for d in e["dossiers"] for p in d["photos"] if p["name"] == nom)
+
+
+def corriger(client, *paires):
+    """Comme le bouton « Corriger la sélection » : [(id, date)]."""
+    return client.post("/api/corriger", json={"photos": [{"id": i, "date": d} for i, d in paires]})
 
 
 @pytest.mark.parametrize("parts,attendu", [
@@ -88,13 +102,13 @@ def test_analyse_et_correction(app):
     assert items["IMG_20110502_101010.jpg"]["proposed"] == ""
 
     client = app.app.test_client()
-    assert client.get("/").status_code == 200
+    assert etat(client)["a_traiter"] == 2
     it = items["2008-08-10-014136052.jpg"]
-    client.post("/apply", data={"sel": it["id"], f"date_{it['id']}": it["proposed"]})
+    assert corriger(client, (it["id"], it["proposed"])).json() == {"ok": True, "n": 1}
     app.APPLY_THREAD.join(timeout=60)
     assert it["result"]["ok"], it["result"]
     assert "1 fichier(s) corrigé(s)" in app.STATE["messages"][0]
-    assert client.get("/progress").get_json()["running"] is False
+    assert client.get("/api/progression").json()["running"] is False
     assert not list(burger.glob("*_original"))
 
 
@@ -136,12 +150,12 @@ def test_scan_nouveaux_et_tout(app):
     app.scan_worker("tout")
     assert app.CACHE_FILE.exists()
     assert app.STATE["stats"]["ok"] == 1 and app.STATE["stats"]["sans_date"] == 1
-    assert "Scanner les nouveaux" in client.get("/").get_data(as_text=True)
+    assert etat(client)["has_cache"] is True          # « Scanner les nouveaux » proposé
 
     # nouveau fichier + correction de b.jpg (modifié) → seuls ces deux-là sont relus
     img.save(dossier / "c.jpg")
     b = next(i for i in app.STATE["items"] if i["name"] == "b.jpg")
-    client.post("/apply", data={"sel": b["id"], f"date_{b['id']}": b["proposed"]})
+    corriger(client, (b["id"], b["proposed"]))
     app.APPLY_THREAD.join(timeout=60)
     lus = []
     origine = app.run_exiftool_files
@@ -189,29 +203,31 @@ def test_voisines_et_deja_corrigees(app):
     assert nom["choice_voisins"] == "2008-08-10T14:42:39"
 
     client = app.app.test_client()
-    html = client.get("/").get_data(as_text=True)
-    assert 'data-vmin="2008-08-10"' in html and "Déjà corrigées (0)" in html
+    e = etat(client)
+    assert photo(e, "faux.jpg")["voisins"]["min"] == "2008-08-10" and e["nb_corrigees"] == 0
+    assert "path" not in photo(e, "faux.jpg")             # le chemin complet reste sur le serveur
 
-    client.post("/apply", data={"sel": faux["id"], f"date_{faux['id']}": faux["proposed"]})
+    corriger(client, (faux["id"], faux["proposed"]))
     app.APPLY_THREAD.join(timeout=60)
     assert faux["result"]["ok"]
-    html = client.get("/").get_data(as_text=True)
-    assert "À traiter — tout (2)" in html and "Déjà corrigées (1)" in html
-    assert "Avant : 24/12/2022 14:42:39" in html and "10/08/2008 14:42:39" in html
-    assert client.get(f"/thumb/{faux['id']}").status_code == 200
+    e = etat(client)
+    assert e["a_traiter"] == 2 and e["nb_corrigees"] == 1
+    fait = e["corrigees"][0]["photos"][0]
+    assert fait["avant"] == "24/12/2022 14:42:39" and fait["apres"].startswith("10/08/2008 14:42:39")
+    assert client.get(f"/api/miniature/{faux['id']}").status_code == 200
 
     # après un nouveau scan, la photo corrigée n'est plus signalée mais reste dans « Déjà corrigées »
     app.scan_worker("nouveaux")
     assert "faux.jpg" not in {i["name"] for i in app.STATE["items"]}
-    assert "Déjà corrigées (1)" in client.get("/").get_data(as_text=True)
+    assert etat(client)["nb_corrigees"] == 1
 
     # si l'écart revient, elle repasse « À traiter » avec la mention
     _exif(burger / "faux.jpg", "2022:12:24 14:42:39")
     app.scan_worker("nouveaux")
     revenu = next(i for i in app.STATE["items"] if i["name"] == "faux.jpg")
     assert revenu["deja"]
-    html = client.get("/").get_data(as_text=True)
-    assert "Déjà corrigées (0)" in html and "écart toujours présent" in html
+    e = etat(client)
+    assert e["nb_corrigees"] == 0 and photo(e, "faux.jpg")["deja"]      # « écart toujours présent »
 
 
 def _video(path, *opts):
@@ -230,13 +246,12 @@ def test_conversion_mp4(app):
     items = {i["name"]: i for i in app.STATE["items"]}
     assert set(items) == {"clip.avi", "clip2.mkv", "00001.mts"}
     assert all(i["convertir"] for i in items.values())
+    assert {i["status"] for i in items.values()} == {"sans date"}
     client = app.app.test_client()
-    assert 'data-convertir="1"' in client.get("/").get_data(as_text=True)
+    assert all(p["convertir"] for d in etat(client)["dossiers"] for p in d["photos"])
 
-    data = {"sel": [i["id"] for i in items.values()]}
-    for i in items.values():
-        data[f"date_{i['id']}"] = "2015-06-20T15:30:00"
-    client.post("/apply", data=data)
+    r = corriger(client, *[(i["id"], "2015-06-20T15:30:00") for i in items.values()])
+    assert r.json() == {"ok": True, "n": 3}, r.text     # 3.0.0 : le .mts (flux MPEG-TS) n'est plus pris pour un fichier abîmé
     app.APPLY_THREAD.join(timeout=300)
     for nom, it in items.items():
         assert it["result"]["ok"], (nom, it["result"])
@@ -246,7 +261,7 @@ def test_conversion_mp4(app):
 
     app.scan_worker("nouveaux")
     assert app.STATE["items"] == []                                   # les MP4 ont la bonne date
-    assert "Déjà corrigées (3)" in client.get("/").get_data(as_text=True)
+    assert etat(client)["nb_corrigees"] == 3
 
 
 @pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
@@ -281,7 +296,7 @@ def test_estimations_par_etape(app):
 
     def espion(paths):
         if not vus:
-            vus.append(client.get("/progress").get_json())
+            vus.append(client.get("/api/progression").json())
         return origine(paths)
 
     app.run_exiftool_files = espion
@@ -294,21 +309,6 @@ def test_estimations_par_etape(app):
     assert etapes["walk"]["status"] == "done" and etapes["walk"]["duration"] is not None
     assert etapes["analyse"]["status"] == "current" and etapes["analyse"]["estimate"] is not None
     assert st["total_remaining"] is not None
-    html = client.get("/").get_data(as_text=True)
-    assert 'id="prog-steps"' in html
-
-
-@pytest.mark.skipif(not shutil.which("node"), reason="node absent")
-def test_javascript_valide(app, tmp_path):
-    """Le script de la page doit se lire sans erreur de syntaxe (cas réel : apostrophe mal échappée)."""
-    app.STATE.update(running=True, steps=[])
-    html = app.app.test_client().get("/").get_data(as_text=True)
-    app.STATE["running"] = False
-    js = html.split("<script>")[1].split("</script>")[0]
-    f = tmp_path / "page.js"
-    f.write_text(js, encoding="utf-8")
-    p = subprocess.run(["node", "--check", str(f)], capture_output=True, text=True)
-    assert p.returncode == 0, p.stderr
 
 
 @pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
@@ -328,9 +328,11 @@ def test_fichiers_mal_nommes_ou_abimes(app):
     items = {i["name"]: i for i in app.STATE["items"]}
     assert items["bruit.jpg"]["status"] == "abîmé" and app.STATE["stats"]["abime"] == 1
     assert items["png.jpg"]["vrai_ext"] == "png"
-    html = app.app.test_client().get("/").get_data(as_text=True)
-    assert "Extension incorrecte : le contenu est un PNG" in html and "Fichiers abîmés (1)" in html
-    assert f'value="{items["bruit.jpg"]["id"]}"' not in html     # pas de case à cocher pour un fichier abîmé
+    client = app.app.test_client()
+    e = etat(client)
+    assert photo(e, "png.jpg")["vrai_ext"] == "png" and e["compte"]["abîmé"] == 1
+    r = corriger(client, (items["bruit.jpg"]["id"], "2008-08-10T12:00:00"))
+    assert r.status_code == 400                                   # un fichier abîmé n'est jamais corrigé
 
     nd = app.dt.datetime(2008, 8, 10, 12, 0)
     ok, msg, notes = app.write_date_robust(items["png.jpg"], nd)
@@ -394,26 +396,26 @@ def test_dossier_mal_date_valider_ou_renommer(app):
     folders = app.STATE["folders"]
     assert folders["2007/2007 - Bisca et dune du pila"]["nouveau"] == "2008/2008-02-03 Bisca et dune du pila"
     assert folders["2009/2009 - Pâques"]["nouveau"] == "2010/2010-04 Pâques"
-    html = client.get("/").get_data(as_text=True)
-    assert "2008/2008-02-03 Bisca et dune du pila" in html and "3/3 photos datées du 03/02/2008" in html
+    prop = next(d for d in etat(client)["dossiers"] if d["nom"] == "2007/2007 - Bisca et dune du pila")["proposition"]
+    assert prop["nouveau"] == "2008/2008-02-03 Bisca et dune du pila" and "3/3 photos datées du 03/02/2008" in prop["label"]
 
     # validation telle quelle : plus signalées, rien de modifié
     avant = {p.name: p.stat().st_mtime_ns for p in bisca.iterdir()}
-    r = client.post("/valider", json={"folder": "2007/2007 - Bisca et dune du pila"})
-    assert r.get_json()["n"] == 3
-    assert "Déjà corrigées (3)" in client.get("/").get_data(as_text=True)
+    r = client.post("/api/valider", json={"folder": "2007/2007 - Bisca et dune du pila"})
+    assert r.json()["n"] == 3
+    assert etat(client)["nb_corrigees"] == 3
     app.scan_worker("nouveaux")
     assert {i["folder"] for i in app.STATE["items"]} == {"2009/2009 - Pâques"}
     assert app.STATE["stats"]["valide"] == 3
     assert {p.name: p.stat().st_mtime_ns for p in bisca.iterdir()} == avant
 
     # renommage proposé
-    r = client.post("/renommer", json={"folder": "2009/2009 - Pâques", "nouveau": "2010/2010-04 Pâques"})
-    assert r.get_json()["ok"]
+    r = client.post("/api/renommer", json={"folder": "2009/2009 - Pâques", "nouveau": "2010/2010-04 Pâques"})
+    assert r.json()["ok"]
     for _ in range(100):
         if not app.STATE["running"]:
             break
-        app.time_sleep(0.1)
+        __import__("time").sleep(0.1)
     assert (app.SCAN_DIR / "2010" / "2010-04 Pâques" / "2010-04-04-100000.jpg").exists()
     assert not autre.exists()
     # dossier bien daté : plus de conflit nom/dossier, reste à écrire la date (photos sans EXIF)
@@ -422,8 +424,8 @@ def test_dossier_mal_date_valider_ou_renommer(app):
     assert "Dossier renommé" in app.STATE["messages"][0]
 
     # garde-fous
-    assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "../evasion"}).status_code == 400
-    assert client.post("/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "2010/2010-04 Pâques"}).status_code == 409
+    assert client.post("/api/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "../evasion"}).status_code == 400
+    assert client.post("/api/renommer", json={"folder": "2007/2007 - Bisca et dune du pila", "nouveau": "2010/2010-04 Pâques"}).status_code == 409
 
 
 def _mov_moov_en_fin(path, creation="2014-08-31T02:18:25+0200"):
@@ -453,7 +455,7 @@ def test_video_moov_en_fin_et_realignement(app):
         f.write("horodatage;fichier;ancienne_date;source;nouvelle_date;statut;detail\n")
         f.write(f"2026-11-11T12:00:00;{abimee};;;31/08/2014 17:10:03;échec;relu 31/08/2014 01:14:34 (CreationDate)\n")
     client = app.app.test_client()
-    assert "1 vidéo(s) modifiée(s) à tort" in client.get("/").get_data(as_text=True)
+    assert etat(client)["a_realigner"] == 1           # « 1 vidéo(s) modifiée(s) à tort »
     app.STATE["running"] = False
     app.realign_worker(app.videos_a_realigner())
     rec = app.run_exiftool(abimee, False)[0]
@@ -496,23 +498,25 @@ def _empreintes(racine):
 
 
 def test_111_rien_sans_mot_de_passe(app, monkeypatch):
-    from flask.testing import FlaskClient
-    anonyme = FlaskClient(app.app)
-    assert anonyme.get("/health").get_json()["ok"] is True
-    r = anonyme.get("/")
-    assert r.status_code == 302 and r.headers["Location"].endswith("/connexion")
-    for chemin in ("/progress", "/journal.csv", "/thumb/x"):
+    anonyme = TestClient(app.app)
+    assert anonyme.get("/health").json()["ok"] is True
+    assert anonyme.get("/icone.svg").status_code == 200                     # icône sans session (Anneau, écran d'accueil)
+    assert anonyme.get("/api/session").json()["connecte"] is False
+    for chemin in ("/api/etat", "/api/progression", "/api/journal.csv", "/api/miniature/x"):
         assert anonyme.get(chemin).status_code == 401
-    for chemin in ("/scan", "/apply", "/valider", "/renommer", "/realigner"):
-        assert anonyme.post(chemin).status_code == 401
-    assert anonyme.post("/connexion", data={"mot_de_passe": "faux"}).status_code == 401
-    assert anonyme.get("/").status_code == 302                              # toujours dehors
-    assert anonyme.post("/connexion", data={"mot_de_passe": MDP}).status_code == 302
-    assert anonyme.get("/").status_code == 200
-    assert anonyme.post("/deconnexion").status_code == 302 and anonyme.get("/progress").status_code == 401
+    for chemin in ("/api/analyse", "/api/corriger", "/api/valider", "/api/renommer", "/api/realigner"):
+        assert anonyme.post(chemin, json={}).status_code == 401
+    assert anonyme.post("/api/connexion", json={"mot_de_passe": "faux"}).status_code == 401
+    assert anonyme.get("/api/etat").status_code == 401                      # toujours dehors
+    assert anonyme.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 200
+    assert anonyme.get("/api/etat").status_code == 200
+    assert anonyme.post("/api/deconnexion").status_code == 200 and anonyme.get("/api/progression").status_code == 401
     # sans mot de passe configuré, l'outil ne s'ouvre pas du tout
     monkeypatch.setattr(app.module_de("PASSWORD"), "PASSWORD", "")
-    assert anonyme.get("/").status_code == 503 and anonyme.post("/connexion", data={"mot_de_passe": ""}).status_code == 503
+    assert anonyme.get("/api/etat").status_code == 503
+    assert anonyme.post("/api/connexion", json={"mot_de_passe": ""}).status_code == 503
+    # /health ne donne que des nombres : aucun nom de fichier ni de dossier
+    assert set(anonyme.get("/health").json()) == {"ok", "version", "a_traiter", "en_cours"}
 
 
 @pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
@@ -530,11 +534,13 @@ def test_111_lecture_seule_aucun_fichier_ne_bouge(app, monkeypatch):
     monkeypatch.setattr(app.module_de("LECTURE_SEULE"), "LECTURE_SEULE", True)
     avant = _empreintes(app.SCAN_DIR)
     client = app.app.test_client()
-    assert "Mode lecture seule" in client.get("/").get_data(as_text=True)
-    client.post("/apply", data={"sel": it["id"], f"date_{it['id']}": it["proposed"]})
-    assert client.get("/progress").get_json()["running"] is False
-    assert client.post("/renommer", json={"folder": "2019/2019-07-14 Mariage", "nouveau": "2010/2010-01-01 Autre"}).status_code == 409
-    client.post("/realigner")
+    assert etat(client)["lecture_seule"] is True
+    assert client.get("/api/session").json()["lecture_seule"] is True
+    r = corriger(client, (it["id"], it["proposed"]))
+    assert r.status_code == 409 and "lecture seule" in r.json()["detail"]
+    assert client.get("/api/progression").json()["running"] is False
+    assert client.post("/api/renommer", json={"folder": "2019/2019-07-14 Mariage", "nouveau": "2010/2010-01-01 Autre"}).status_code == 409
+    assert client.post("/api/realigner").status_code == 409
     for ecrire in (lambda: app.write_date(it, app.dt.datetime(2019, 7, 14, 10, 0)),
                    lambda: app.write_date_robust(it, app.dt.datetime(2019, 7, 14, 10, 0)),
                    lambda: app.convert_and_date(it, app.dt.datetime(2019, 7, 14, 10, 0)),
