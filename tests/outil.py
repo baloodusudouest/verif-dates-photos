@@ -24,6 +24,13 @@ class Outil:
                 return vars(m)[nom]
         raise AttributeError(nom)
 
+    def module_de(self, nom):
+        """Le module qui définit `nom` : à donner à monkeypatch.setattr, qui ne passe pas par __getattr__."""
+        for m in self._modules:
+            if nom in vars(m) and not isinstance(vars(m)[nom], type(sys)):
+                return m
+        raise AttributeError(nom)
+
     def __setattr__(self, nom, valeur):
         cibles = [m for m in self._modules if nom in vars(m)] or [self._modules[-1]]
         for m in cibles:

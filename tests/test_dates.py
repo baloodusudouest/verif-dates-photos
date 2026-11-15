@@ -251,7 +251,7 @@ def test_conversion_mp4(app):
 
 @pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which("ffmpeg")), reason="exiftool/ffmpeg absents")
 def test_conversion_garde_original(app, tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "ORIGINALS_DIR", str(tmp_path / "originaux"))
+    monkeypatch.setattr(app.module_de("ORIGINALS_DIR"), "ORIGINALS_DIR", str(tmp_path / "originaux"))
     dossier = app.SCAN_DIR / "2015" / "2015-06-20 Fête"
     dossier.mkdir(parents=True)
     _video(dossier / "clip.avi", "-c:v", "mjpeg", "-c:a", "pcm_s16le")
@@ -511,7 +511,7 @@ def test_111_rien_sans_mot_de_passe(app, monkeypatch):
     assert anonyme.get("/").status_code == 200
     assert anonyme.post("/deconnexion").status_code == 302 and anonyme.get("/progress").status_code == 401
     # sans mot de passe configuré, l'outil ne s'ouvre pas du tout
-    monkeypatch.setattr(app, "PASSWORD", "")
+    monkeypatch.setattr(app.module_de("PASSWORD"), "PASSWORD", "")
     assert anonyme.get("/").status_code == 503 and anonyme.post("/connexion", data={"mot_de_passe": ""}).status_code == 503
 
 
@@ -527,7 +527,7 @@ def test_111_lecture_seule_aucun_fichier_ne_bouge(app, monkeypatch):
     app.scan_worker()
     it = next(i for i in app.STATE["items"] if i["name"] == "a.jpg")
     assert it["status"] == "écart" and it["proposed"]
-    monkeypatch.setattr(app, "LECTURE_SEULE", True)
+    monkeypatch.setattr(app.module_de("LECTURE_SEULE"), "LECTURE_SEULE", True)
     avant = _empreintes(app.SCAN_DIR)
     client = app.app.test_client()
     assert "Mode lecture seule" in client.get("/").get_data(as_text=True)
