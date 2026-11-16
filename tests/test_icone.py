@@ -11,8 +11,8 @@ from outil import charger  # noqa: E402
 def test_icone_sans_session(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VERIF_PASSWORD", "mot-de-passe-essai")
-    for k in ("MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):     # 3.1.0 : seules les variables du test
+    monkeypatch.setenv("MAISON_PASSWORD", "mot-de-passe-essai")
+    for k in ("VERIF_PASSWORD", "MAISON_LECTURE_SEULE", "MAISON_JETON"):     # seules les variables du test
         monkeypatch.delenv(k, raising=False)
     module = charger()
     c = TestClient(module.app)                        # client nu : aucune session
@@ -20,6 +20,6 @@ def test_icone_sans_session(tmp_path, monkeypatch):
         r = c.get("/" + nom)
         assert r.status_code == 200 and r.headers["content-type"].startswith(sorte), nom
     for code in ("/main.py", "/app/main.py", "/../app/main.py", "/reglages.py"):
-        assert "VERIF_PASSWORD" not in c.get(code).text, code      # le code du serveur ne se lit jamais
+        assert "MAISON_PASSWORD" not in c.get(code).text, code      # le code du serveur ne se lit jamais
     assert c.get("/api/etat").status_code == 401      # le reste demande toujours la session
     assert "Éphéméride" in c.get("/manifest.webmanifest").text

@@ -43,7 +43,7 @@ def page(request, tmp_path):
         pg.on("pageerror", lambda e: erreurs.append(str(e)))
         pg.on("dialog", lambda d: d.accept())
         pg.goto(f"http://127.0.0.1:{port}/")
-        pg.get_by_label(re.compile("Mot de passe")).fill("essai")
+        pg.get_by_label(re.compile("Mot de passe")).fill("essai-ephemeride")
         pg.get_by_role("button", name="Se connecter").click()
         pg.wait_for_selector("nav.rail")
         pg.dossier = tmp_path
@@ -119,3 +119,31 @@ def test_30_choix_coherence_filtre_et_validation(page):
     page.locator("#corrigees .card").first.wait_for()
     assert page.locator("#corrigees .card").count() == 2                               # validées sans modification
     assert "dates validées telles quelles" in page.locator("#corrigees").inner_text()
+
+
+def test_32_reglages_et_restaurer(page):
+    """3.2.0 : la tolérance se règle dans Réglages, et « Restaurer » montre puis applique une sauvegarde de l'Anneau."""
+    page.locator("nav.rail a[aria-label='Réglages']").click()
+    reglages = page.locator("#reglages")
+    champ = reglages.locator("input[name='tolerance_jours']")
+    champ.wait_for()
+    assert champ.input_value() == "1"
+    assert reglages.locator("input[name='sous_dossier']").input_value() == "Pellicule"
+    champ.fill("3")
+    reglages.get_by_role("button", name="Enregistrer").click()
+    reglages.get_by_role("status").wait_for()
+    assert "Réglages enregistrés" in reglages.get_by_role("status").inner_text()
+    dossier = reglages.locator("input[name='sous_dossier']")
+    dossier.fill("../dehors")
+    reglages.get_by_role("button", name="Enregistrer").click()
+    assert "sans « .. »" in reglages.get_by_role("alert").inner_text()          # refus clair, sans erreur de page
+    dossier.fill("Pellicule")
+    restaurer = page.locator("#restaurer")
+    restaurer.get_by_role("button", name="Voir les sauvegardes").click()
+    restaurer.locator("li", has_text="Tolérance").wait_for()
+    assert "3 → 2" in restaurer.locator("li", has_text="Tolérance").inner_text()
+    restaurer.get_by_role("button", name="Restaurer", exact=True).click()       # confirmation acceptée
+    restaurer.get_by_role("status").wait_for()
+    assert "1 réglage(s) restauré(s)" in restaurer.get_by_role("status").inner_text()
+    assert champ.input_value() == "2"
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")

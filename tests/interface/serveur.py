@@ -3,7 +3,7 @@ pour l'occasion (vrais fichiers, exiftool réel), déjà analysée. Il faut l'in
 
     python tests/interface/serveur.py <dossier> <port>
 
-Mot de passe : « essai »."""
+Mot de passe : « essai-ephemeride »."""
 import os
 import subprocess
 import sys
@@ -13,8 +13,9 @@ from PIL import Image
 
 dossier, port = Path(sys.argv[1]), int(sys.argv[2])
 os.environ.update({"LOCAL_ROOT": str(dossier / "photos"), "DATA_DIR": str(dossier / "data"), "TZ": "Europe/Paris",
-                   "VERIF_PASSWORD": "essai", "PORT": str(port)})
-for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT", "VERIF_LECTURE_SEULE", "MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):
+                   "MAISON_PASSWORD": "essai-ephemeride", "PORT": str(port)})
+for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT", "VERIF_LECTURE_SEULE", "VERIF_PASSWORD", "MAISON_LECTURE_SEULE",
+          "MAISON_JETON", "SCAN_SUBDIR", "TOLERANCE_DAYS"):
     os.environ.pop(k, None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from outil import charger  # noqa: E402
@@ -40,6 +41,16 @@ photo(P / "2008" / "2008-08-10 Plage" / "a.jpg", "2008:08:10 09:00:00", "#8ac8c0
 photo(P / "2008" / "2008-08-10 Plage" / "b.jpg", "2008:08:10 09:30:00", "#8ac8c0")
 photo(P / "2008" / "2008-08-10 Plage" / "c.jpg", "2012:01:01 08:00:00", "#b08ac8")    # écart
 outil.scan_worker()
+
+
+def anneau_de_demo(adresse, jeton):
+    """3.2.0 : faux Anneau pour « Restaurer les réglages » (aucun réseau)."""
+    if "?le=" not in adresse:
+        return {"dates": ["2026-11-15"]}
+    return {"le": "2026-11-15", "version": "3.2.0", "reglages": {"sous_dossier": "Pellicule", "tolerance_jours": 2}}
+
+
+outil.ETAT["lire_sauvegarde"] = anneau_de_demo
 (dossier / "pret").write_text("ok")
 import uvicorn  # noqa: E402
 uvicorn.run(outil.app, host="127.0.0.1", port=port, log_level="warning")

@@ -1,4 +1,4 @@
-"""Module commun des applis maison — contrat 1 (16/11/2026).
+"""Module commun des applis maison — contrat 2 (16/11/2026 ; contrat 1 : variables communes, contrat 2 : réglages et sauvegarde).
 
 Fichier de référence : baloodusudouest/socle, app/maison.py. Il est copié TEL QUEL dans chaque appli
 (tools/diffuser_maison.py) ; ne jamais le modifier ailleurs que dans le socle. La dernière ligne porte une
@@ -10,7 +10,13 @@ Variables communes de la stack (aucune valeur dans le code) :
   MAISON_JETON_ANCIEN    accepté en plus pendant un changement de jeton ; vide le reste du temps
   MAISON_LECTURE_SEULE   « oui » : aucune appli n'écrit chez un service extérieur ; la variable propre à une appli,
                          si elle est posée (« oui » ou « non »), l'emporte pour cette appli
-  MAISON_ANNEAU_URL      adresse de l'Anneau dans la stack (défaut http://anneau:8094), pour l'annuaire
+  MAISON_ANNEAU_URL      adresse de l'Anneau dans la stack (défaut http://anneau:8094), pour l'annuaire et les sauvegardes
+
+Sauvegarde des réglages (contrat de sauvegarde 1) : chaque appli garde ses réglages d'usage (classe Reglages, ou sa
+propre table) et les rend par GET /externe/sauvegarde (jeton commun) avec sauvegarde(...) ; l'Anneau les collecte
+chaque nuit ; « Restaurer » relit une sauvegarde chez l'Anneau (lire_sauvegarde) et applique les différences.
+Jamais de secret dans une sauvegarde : est_secret() écarte tout nom qui y ressemble, et chaque appli peut en exclure
+d'autres explicitement.
 
 Bibliothèque standard seulement : aucune dépendance ajoutée aux applis.
 """
@@ -22,10 +28,12 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
-CONTRAT = 1
+CONTRAT = 2
 VRAI = {"oui", "1", "true", "yes", "vrai"}
 FAUX = {"non", "0", "false", "no", "faux"}
 
@@ -165,6 +173,173 @@ class Annuaire:
         return ((s.get("privee") if prive else "") or s.get("locale") or repli).rstrip("/")
 
 
+# ---------------------------------------------------------------- réglages d'usage (contrat 2)
+
+CONTRAT_SAUVEGARDE = 1
+_MOTS_SECRETS = ("password", "motdepasse", "secret", "jeton", "token", "cle", "key", "code", "hash", "webhook",
+                 "identifiant", "login", "user", "email", "courriel")
+
+
+def est_secret(nom: str) -> bool:
+    """Même esprit que la règle d'Atlas : tout nom qui ressemble à un secret est écarté des sauvegardes."""
+    c = cle(nom)
+    return any(m in c for m in _MOTS_SECRETS)
+
+
+def _convertir(brut: str, modele):
+    """Valeur d'une variable (texte) vers le type de la valeur par défaut."""
+    if isinstance(modele, bool):
+        return brut.strip().lower() in VRAI
+    if isinstance(modele, int):
+        return int(brut.strip())
+    if isinstance(modele, float):
+        return float(brut.strip().replace(",", "."))
+    if isinstance(modele, list):
+        sep = "|" if "|" in brut else ","
+        return [x.strip() for x in brut.split(sep) if x.strip()]
+    return brut.strip()
+
+
+def _meme_type(valeur, modele):
+    """Accepte une valeur reçue de l'écran ou d'une sauvegarde si elle a le type de la valeur par défaut."""
+    if isinstance(modele, bool):
+        if isinstance(valeur, bool):
+            return valeur
+        raise ValueError("oui ou non attendu")
+    if isinstance(modele, int) and not isinstance(modele, bool):
+        if isinstance(valeur, bool):
+            raise ValueError("nombre entier attendu")
+        return int(valeur)
+    if isinstance(modele, float):
+        return float(valeur)
+    if isinstance(modele, list):
+        if isinstance(valeur, str):
+            return _convertir(valeur, modele)
+        if isinstance(valeur, list):
+            return [str(x).strip() for x in valeur if str(x).strip()]
+        raise ValueError("liste attendue")
+    if isinstance(valeur, (dict, list)):
+        raise ValueError("texte attendu")
+    return "" if valeur is None else str(valeur)
+
+
+class Reglages:
+    """Réglages d'usage d'une appli, gardés dans un fichier JSON de son dossier de données.
+
+    defauts   : {clé: valeur par défaut} — le type de la valeur par défaut fixe le type du réglage ;
+    variables : {clé: NOM_DE_VARIABLE} — au premier démarrage, une clé absente du fichier prend la valeur de sa
+                variable si elle est posée (reprise depuis la stack), sinon la valeur par défaut. Ensuite la variable
+                n'est plus lue : le réglage se change dans l'écran Réglages.
+    """
+
+    def __init__(self, chemin: str | Path, defauts: dict, variables: dict | None = None):
+        self.chemin = Path(chemin)
+        self.defauts = dict(defauts)
+        self._verrou = threading.Lock()
+        self.repris: list[str] = []          # clés reprises d'une variable à ce démarrage (pour le journal)
+        donnees: dict = {}
+        try:
+            donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
+            if not isinstance(donnees, dict):
+                donnees = {}
+        except (OSError, ValueError):
+            donnees = {}
+        change = False
+        for k, defaut in self.defauts.items():
+            if k in donnees:
+                try:
+                    donnees[k] = _meme_type(donnees[k], defaut)
+                except (TypeError, ValueError):
+                    donnees[k] = defaut
+                    change = True
+                continue
+            brut = _env((variables or {}).get(k, ""))
+            valeur = defaut
+            if brut:
+                try:
+                    valeur = _convertir(brut, defaut)
+                    self.repris.append(k)
+                except (TypeError, ValueError):
+                    valeur = defaut
+            donnees[k] = valeur
+            change = True
+        self._donnees = {k: donnees[k] for k in self.defauts}
+        if change:
+            self._ecrire()
+
+    def _ecrire(self) -> None:
+        self.chemin.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.chemin.with_suffix(self.chemin.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._donnees, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.chemin)
+
+    def tout(self) -> dict:
+        with self._verrou:
+            return json.loads(json.dumps(self._donnees))
+
+    def get(self, k: str):
+        with self._verrou:
+            return json.loads(json.dumps(self._donnees[k]))
+
+    def changer(self, valeurs: dict) -> dict:
+        """Change les clés connues (les autres sont ignorées) ; ValueError si une valeur n'a pas le bon type."""
+        propres = {}
+        for k, v in (valeurs or {}).items():
+            if k in self.defauts:
+                propres[k] = _meme_type(v, self.defauts[k])
+        with self._verrou:
+            self._donnees.update(propres)
+            self._ecrire()
+            return json.loads(json.dumps(self._donnees))
+
+
+# ---------------------------------------------------------------- sauvegarde et restauration (contrat de sauvegarde 1)
+
+def _json_simple(v) -> bool:
+    try:
+        json.dumps(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def reglages_publics(reglages: dict, exclus=()) -> dict:
+    """Les réglages qui peuvent sortir de l'appli : ni nom de secret, ni clé exclue par l'appli."""
+    ex = {cle(e) for e in exclus}
+    return {k: v for k, v in (reglages or {}).items()
+            if not est_secret(k) and cle(k) not in ex and _json_simple(v)}
+
+
+def sauvegarde(appli: str, version: str, reglages: dict, exclus=()) -> dict:
+    """Réponse de GET /externe/sauvegarde : réglages et version seulement, jamais de variable ni de secret."""
+    return {"contrat": CONTRAT_SAUVEGARDE, "appli": appli, "version": version,
+            "le": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "reglages": reglages_publics(reglages, exclus)}
+
+
+def differences(actuels: dict, sauves: dict, exclus=()) -> list[dict]:
+    """Réglages d'une sauvegarde qui diffèrent de l'actuel, pour les clés que l'appli connaît encore."""
+    s = reglages_publics(sauves, exclus)
+    return [{"cle": k, "actuel": actuels.get(k), "sauve": v}
+            for k, v in sorted(s.items()) if k in actuels and actuels.get(k) != v]
+
+
+def lire_sauvegarde(appli: str, le: str = "", url: str | None = None, jeton: str | None = None, lire=None) -> dict:
+    """Demande à l'Anneau (jeton commun) : sans « le », {"dates": ["AAAA-MM-JJ", …]} (la plus récente d'abord) ;
+    avec « le », {"le", "version", "reglages"} de cette appli ce jour-là. Lève une exception si l'Anneau ne répond
+    pas ou n'a rien : l'appli l'affiche telle quelle."""
+    base = (url if url is not None else (_env("MAISON_ANNEAU_URL") or "http://anneau:8094")).rstrip("/")
+    adresse = f"{base}/externe/sauvegardes/{urllib.parse.quote(appli)}"
+    if le:
+        adresse += "?le=" + urllib.parse.quote(le)
+    jet = jeton if jeton is not None else jeton_a_envoyer()
+    if lire is not None:
+        return lire(adresse, jet)
+    demande = urllib.request.Request(adresse, headers={"Authorization": f"Bearer {jet}"})
+    with urllib.request.urlopen(demande, timeout=10) as r:          # noqa: S310 (adresse de la stack)
+        return json.loads(r.read().decode())
+
+
 # ---------------------------------------------------------------- empreinte (copie non retouchée)
 
 def empreinte_calculee(chemin: str | Path | None = None) -> str:
@@ -176,4 +351,4 @@ def empreinte_calculee(chemin: str | Path | None = None) -> str:
 def empreinte_ecrite(chemin: str | Path | None = None) -> str:
     texte = Path(chemin or __file__).read_text(encoding="utf-8")
     return texte.rsplit("\n# empreinte: ", 1)[-1].strip() if "\n# empreinte: " in texte else ""
-# empreinte: b7c1d8273b5b4173
+# empreinte: 7d1bfc0a9a1ac067

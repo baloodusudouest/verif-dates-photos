@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 3.2.0 — 16 novembre 2026
+- **Les réglages passent dans l'appli** : le dossier analysé (`sous_dossier`, « Pellicule » par défaut) et la tolérance (`tolerance_jours`, 1 jour par défaut) se changent dans l'écran **Réglages**, sans redémarrer. Ils sont gardés dans `/data/reglages.json`. Au premier démarrage, ils sont repris une fois des anciennes variables `SCAN_SUBDIR` et `TOLERANCE_DAYS` si elles sont encore dans la stack (une ligne au journal `corrections.csv` pour chacun) ; ensuite ces variables ne sont plus lues. Chaque changement est noté au journal. Pas de changement pendant une analyse ou une correction.
+- **Sauvegarde pour l'Anneau** : `GET /externe/sauvegarde` rend ces réglages et la version (contrat de sauvegarde 1). La porte ne s'ouvre qu'au jeton commun `MAISON_JETON` ; sans lui, elle reste fermée. Jamais de variable, de chemin ni de secret dans la réponse ; les renseignements fixés par la stack (lecture seule, originaux gardés) n'en sortent jamais.
+- **Restaurer les réglages** (écran Réglages) : choisir une date de sauvegarde, voir les différences (avant → sauvegardé), confirmer. Message clair si l'Anneau ne répond pas ou n'a rien. Permis même en lecture seule : seuls les réglages de l'outil changent, aucune photo.
+- **Anciens noms retirés** : le mot de passe ne se lit plus que dans `MAISON_PASSWORD` (12 caractères au moins) ; `VERIF_PASSWORD` seule ne suffit plus et l'outil refuse de démarrer. `VERIF_LECTURE_SEULE` reste (forçage propre à cet outil).
+- Module commun `app/maison.py` : contrat 2 du socle, copié tel quel.
+- Tests : reprise des anciennes variables au premier démarrage puis plus jamais, changement par l'écran, valeurs refusées (400), porte de sauvegarde (jeton commun seulement, ni secret ni clé exclue, contrat 1), restauration (dates, différences, application, Anneau injoignable, lecture seule) ; test d'écran Réglages et Restaurer sur PC et iPhone, sans débordement. Les écritures dans les photos n'ont pas changé : les preuves de lecture seule passent telles quelles.
+
 ## 3.1.0 — 16 novembre 2026
 - **Variables communes de la maison** (module `app/maison.py` du socle 0.5.0, copié tel quel) :
   - mot de passe : `MAISON_PASSWORD`, repli sur `VERIF_PASSWORD` ; sans l'un ni l'autre, rien ne s'ouvre, comme avant ;

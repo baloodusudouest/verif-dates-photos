@@ -1,6 +1,8 @@
 # Éphéméride (verif-dates-photos)
 
-> Depuis la 2.0.1 l'appli s'appelle **Éphéméride**. Le dépôt, l'image, le conteneur et les variables gardent leur nom technique `verif-dates-photos` / `VERIF_…` : rien à changer dans la stack.
+> Depuis la 2.0.1 l'appli s'appelle **Éphéméride**. Le dépôt, l'image et le conteneur gardent leur nom technique `verif-dates-photos`.
+
+> **Version 3.2.0** : le dossier analysé et la tolérance se règlent dans l'écran **Réglages** (plus dans la stack), l'Anneau en garde une sauvegarde chaque nuit et « Restaurer les réglages » la reprend. Le mot de passe se lit dans `MAISON_PASSWORD` seulement.
 
 > **Version 2.0.0** : même outil, mêmes règles, avec un mot de passe, un mode lecture seule et l'habillage commun aux autres applis (rail, tuiles, sections Connexion et Réglages). Voir `CHANGELOG.md`.
 
@@ -13,7 +15,7 @@ Petite page web qui vérifie les dates des photos d'une **Pellicule** rangée pa
    - à la **date du dossier** : `AAAA-MM-JJ`, sinon `AAAA-MM`, sinon `AAAA` ;
    - à la **date du nom du fichier**, si elle existe (`IMG_20190714_153000`, `2008-08-10-014136052`, `Screenshot_2019-07-14-15-20-00`…).
 2. **Signale** :
-   - les **écarts** de plus de `TOLERANCE_DAYS` jours avec le dossier, ou avec le nom du fichier quand le dossier n'est pas daté ;
+   - les **écarts** de plus de « Tolérance » jours (écran Réglages) avec le dossier, ou avec le nom du fichier quand le dossier n'est pas daté ;
    - les photos **sans date EXIF** ;
    - les photos **à trancher**, quand le nom du fichier contredit le dossier.
 3. **Propose** une date pour chaque photo signalée, dans cet ordre de priorité :
@@ -58,15 +60,14 @@ Elle affiche aussi le temps restant au total.
     container_name: verif_dates_photos
     environment:
       - TZ=Europe/Paris
-      # 3.1.0 : variables communes de la maison (module app/maison.py) ; les anciennes restent lues en repli
-      - MAISON_PASSWORD=${MAISON_PASSWORD}            # mot de passe commun des applis (repli : VERIF_PASSWORD)
+      # variables communes de la maison (module app/maison.py)
+      - MAISON_PASSWORD=${MAISON_PASSWORD}            # mot de passe commun des applis, 12 caractères au moins
+      - MAISON_JETON=${MAISON_JETON}                  # jeton commun : l'Anneau lit la sauvegarde des réglages
       - MAISON_LECTURE_SEULE=${MAISON_LECTURE_SEULE:-}   # « oui » : aucune appli n'écrit ; VERIF_LECTURE_SEULE l'emporte si posée
       - VERIF_LECTURE_SEULE=${VERIF_LECTURE_SEULE:-}  # « oui » ou « non » : force cet outil seul
-      # avant la 3.1.0 (toujours lue si MAISON_PASSWORD est absente) :
-      # - VERIF_PASSWORD=${CARNET_PASSWORD}
       - LOCAL_ROOT=/photos
-      - SCAN_SUBDIR=Pellicule
-      - TOLERANCE_DAYS=1
+      # Le sous-dossier analysé et la tolérance se règlent dans l'écran Réglages (3.2.0) ; s'ils sont encore
+      # dans la stack (SCAN_SUBDIR, TOLERANCE_DAYS), ils sont repris une fois au premier démarrage, puis ignorés.
       - IMMICH_URL=http://immich_server:2283
       - IMMICH_API_KEY=${VERIF_IMMICH_API_KEY}
       - IMMICH_ROOT=/synologyphotos   # le même dossier de photos, vu depuis le conteneur Immich
@@ -82,16 +83,27 @@ Elle affiche aussi le temps restant au total.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `MAISON_PASSWORD` (repli : `VERIF_PASSWORD`) | — (**obligatoire**, l'une ou l'autre) | Mot de passe de la page, commun aux applis de la maison. Sans lui, rien ne s'ouvre (l'API répond 503) |
+| `MAISON_PASSWORD` | — (**obligatoire**, 12 caractères au moins) | Mot de passe de la page, commun aux applis de la maison. Absent ou trop court : l'outil refuse de démarrer |
+| `MAISON_JETON` | — | Jeton commun des applis de la maison : ouvre `/externe/sauvegarde` à l'Anneau (collecte des réglages) et accompagne la demande de « Restaurer ». Vide : pas de sauvegarde, la porte est fermée |
+| `MAISON_ANNEAU_URL` | `http://anneau:8094` | Adresse de l'Anneau dans la stack, pour « Restaurer les réglages » (à ne poser que si elle diffère) |
 | `MAISON_LECTURE_SEULE` | — | `oui` : lecture seule pour toutes les applis de la maison, donc aussi pour cet outil, sauf si `VERIF_LECTURE_SEULE` dit `non` |
 | `VERIF_LECTURE_SEULE` | — | `oui` (ou `1`, `true`, `yes`) : l'outil analyse et propose, mais ne modifie, ne déplace et ne supprime aucun fichier ; `non` : écrit même si `MAISON_LECTURE_SEULE=oui`. Posée, elle l'emporte |
 | `LOCAL_ROOT` | `/photos` | Dossier racine des photos dans le conteneur |
-| `SCAN_SUBDIR` | `Pellicule` | Sous-dossier à analyser |
-| `TOLERANCE_DAYS` | `1` | Écart toléré, en jours |
 | `IMMICH_URL`, `IMMICH_API_KEY`, `IMMICH_ROOT` | — | Accès à Immich (facultatif) |
 | `DATA_DIR` | `/data` | Résultats, cache, miniatures, journal des corrections, photos corrigées |
 | `PORT` | `8099` | Port de la page |
 | `ORIGINALS_DIR` | — | Si défini : dossier où déplacer les vidéos d'origine après conversion en MP4 (sinon elles sont supprimées). À placer hors de la bibliothèque Immich. |
+
+### Réglages (écran Réglages, depuis la 3.2.0)
+
+| Réglage | Type | Défaut | Ancienne variable, reprise une seule fois |
+|---|---|---|---|
+| `sous_dossier` — dossier analysé, dans `LOCAL_ROOT` (vide : le dossier entier) | texte | `Pellicule` | `SCAN_SUBDIR` |
+| `tolerance_jours` — écart permis entre la date de la photo et celle du dossier | entier (0 à 366) | `1` | `TOLERANCE_DAYS` |
+
+Gardés dans `/data/reglages.json`. Un changement prend effet tout de suite, sans redémarrer (la liste change à la prochaine analyse) ; il est noté dans `corrections.csv`. Refusé pendant une analyse ou une correction.
+
+**Sauvegarde et restauration** : `GET /externe/sauvegarde` (jeton `MAISON_JETON` seulement) rend ces deux réglages et la version, jamais une variable, un chemin ni un secret. L'Anneau les collecte chaque nuit ; « Restaurer les réglages » montre les sauvegardes, les différences (avant → sauvegardé) et les applique après confirmation. Permis même en lecture seule : seul `reglages.json` change.
 
 ### Permissions de la clé API Immich
 
@@ -106,7 +118,7 @@ Si la relecture est refusée, lance un scan de la bibliothèque externe.
 
 Les fichiers sont **modifiés sur place**. Fais une sauvegarde avant le premier passage, puis garde `corrections.csv` : il contient l'ancienne et la nouvelle date de chaque fichier.
 
-Depuis la 1.11.0, la page demande un mot de passe (`MAISON_PASSWORD` depuis la 3.1.0, ou `VERIF_PASSWORD`) et rien ne répond sans session, sauf `/health`. Elle reste à garder sur le réseau local ou Tailscale.
+Depuis la 1.11.0, la page demande un mot de passe (`MAISON_PASSWORD`) et rien ne répond sans session, sauf `/health` et `/externe/sauvegarde` (jeton commun seulement). Elle reste à garder sur le réseau local ou Tailscale.
 
 Le mode lecture seule (`VERIF_LECTURE_SEULE=oui`) sert au premier jour d'une nouvelle version : l'analyse et les propositions fonctionnent, toute écriture est refusée, jusque dans les fonctions qui touchent aux fichiers. Il s'allume par `VERIF_LECTURE_SEULE=oui` (cet outil seul) ou par `MAISON_LECTURE_SEULE=oui` (toute la maison) ; Réglages et Connexion disent lequel.
 
@@ -118,7 +130,7 @@ Le retour à une version précédente ramène le code, pas les fichiers : une vi
 pip install -r requirements-dev.txt   # exiftool et ffmpeg doivent aussi être installés
 cd frontend && npm ci && npx vite build && cd ..   # interface Svelte → app/static
 python -m pytest -q                   # tests de l'outil ; tests d'écran si Playwright est installé
-VERIF_PASSWORD=essai DATA_DIR=./data LOCAL_ROOT=./photos uvicorn app.main:app --port 8099
+MAISON_PASSWORD=essai-ephemeride DATA_DIR=./data LOCAL_ROOT=./photos uvicorn app.main:app --port 8099
 ```
 
 Serveur FastAPI (`app/main.py`), interface Svelte 5 + Tailwind 4 (`frontend/`), format commun du socle.

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from outil import charger  # noqa: E402
 
 
-MDP = "essai"
+MDP = "essai-ephemeride"     # 3.2.0 : 12 caractères au moins
 
 
 @pytest.fixture()
@@ -23,9 +23,10 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("TZ", "Europe/Paris")
     for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("VERIF_PASSWORD", MDP)
+    monkeypatch.setenv("MAISON_PASSWORD", MDP)                # 3.2.0 : le seul nom lu
     monkeypatch.delenv("VERIF_LECTURE_SEULE", raising=False)
-    for k in ("MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):     # 3.1.0 : variables communes, absentes par défaut
+    for k in ("VERIF_PASSWORD", "MAISON_LECTURE_SEULE", "MAISON_JETON", "MAISON_JETON_ANCIEN",
+              "SCAN_SUBDIR", "TOLERANCE_DAYS"):              # seules les variables du test
         monkeypatch.delenv(k, raising=False)
     module = charger()
     module.ETAT["attente"] = False      # pas d'attente d'une seconde après chaque connexion
@@ -595,22 +596,23 @@ def test_310_module_maison_copie_non_retouchee():
     assert maison.empreinte_calculee() == maison.empreinte_ecrite()
 
 
-def test_310_mot_de_passe_commun_puis_repli(app, monkeypatch):
-    """MAISON_PASSWORD l'emporte ; sans lui, VERIF_PASSWORD (la stack actuelle) ; sans aucun, rien ne s'ouvre."""
-    assert app.PASSWORD == MDP                                   # stack actuelle : VERIF_PASSWORD seul
-    monkeypatch.setenv("MAISON_PASSWORD", "mot-de-passe-commun")
-    module = charger()
-    module.ETAT["attente"] = False
-    assert module.PASSWORD == "mot-de-passe-commun"
-    c = TestClient(module.app)
-    assert c.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 401
-    assert c.post("/api/connexion", json={"mot_de_passe": "mot-de-passe-commun"}).status_code == 200
+def test_320_mot_de_passe_maison_seul(app, monkeypatch):
+    """3.2.0 : MAISON_PASSWORD seul ; l'ancien nom VERIF_PASSWORD ne suffit plus : l'outil refuse de démarrer.
+    Trop court (moins de 12 caractères) : refus aussi."""
+    assert app.PASSWORD == MDP
+    c = TestClient(app.app)
+    assert c.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 200
     assert c.get("/api/etat").status_code == 200
     monkeypatch.delenv("MAISON_PASSWORD")
-    monkeypatch.delenv("VERIF_PASSWORD")
-    module = charger()
-    r = TestClient(module.app).get("/api/etat")
-    assert r.status_code == 503 and "MAISON_PASSWORD (ou VERIF_PASSWORD)" in r.json()["detail"]
+    monkeypatch.setenv("VERIF_PASSWORD", "ancien-mot-de-passe-long")
+    with pytest.raises(SystemExit) as refus:
+        charger()
+    assert "MAISON_PASSWORD est absent ou trop court" in str(refus.value)
+    monkeypatch.setenv("MAISON_PASSWORD", "court")
+    with pytest.raises(SystemExit):
+        charger()
+    monkeypatch.setenv("MAISON_PASSWORD", MDP)
+    assert charger().PASSWORD == MDP
 
 
 @pytest.mark.parametrize("maison_ls,propre,attendu,origine", [

@@ -22,4 +22,5 @@ async function appel(methode, chemin, corps) {
 export const api = {
   get: (chemin) => appel('GET', chemin),
   post: (chemin, corps) => appel('POST', chemin, corps ?? {}),
+  put: (chemin, corps) => appel('PUT', chemin, corps ?? {}),
 }

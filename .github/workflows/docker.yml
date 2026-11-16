@@ -45,7 +45,7 @@ jobs:
             sh -c "pip install -q --no-cache-dir pytest httpx==0.28.1 && python -m pytest -q"
           # l'interface compilée est bien dans l'image, et l'outil démarre
           docker run --rm verif-dates-photos:test test -f /srv/app/static/index.html
-          docker run -d --name essai -e VERIF_PASSWORD=essai verif-dates-photos:test
+          docker run -d --name essai -e MAISON_PASSWORD=essai-ephemeride verif-dates-photos:test
           for i in $(seq 1 30); do docker exec essai python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8099/health').read().decode())" && break; sleep 1; done
           docker exec essai python -c "import urllib.request;assert b'id=\"app\"' in urllib.request.urlopen('http://127.0.0.1:8099/').read()"
           docker rm -f essai
