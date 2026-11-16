@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import maison
+
 
 LOCAL_ROOT = Path(os.environ.get("LOCAL_ROOT", "/photos"))
 SCAN_DIR = LOCAL_ROOT / os.environ.get("SCAN_SUBDIR", "Pellicule")
@@ -17,8 +19,12 @@ ORIGINALS_DIR = os.environ.get("ORIGINALS_DIR", "").strip()   # vide : originaux
 
 
 # 1.11.0 : mot de passe commun aux applis (obligatoire) et mode lecture seule
-PASSWORD = os.environ.get("VERIF_PASSWORD", "")
-LECTURE_SEULE = os.environ.get("VERIF_LECTURE_SEULE", "").strip().lower() in ("oui", "1", "true", "yes")
+# 3.1.0 : variables communes de la maison (module maison) ; les anciens noms restent lus en repli.
+#   mot de passe : MAISON_PASSWORD, sinon VERIF_PASSWORD
+#   lecture seule : VERIF_LECTURE_SEULE si elle dit oui ou non (elle l'emporte), sinon MAISON_LECTURE_SEULE
+PASSWORD = maison.mot_de_passe("VERIF_PASSWORD")
+LECTURE_SEULE = maison.lecture_seule("VERIF_LECTURE_SEULE")
+ORIGINE_LECTURE_SEULE = maison.origine_lecture_seule("VERIF_LECTURE_SEULE")   # « appli », « maison » ou « »
 THUMBS = DATA_DIR / "thumbs"
 RESULTS_FILE = DATA_DIR / "results.json"
 LOG_FILE = DATA_DIR / "corrections.csv"

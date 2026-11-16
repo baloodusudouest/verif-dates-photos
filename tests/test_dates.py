@@ -25,6 +25,8 @@ def app(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("VERIF_PASSWORD", MDP)
     monkeypatch.delenv("VERIF_LECTURE_SEULE", raising=False)
+    for k in ("MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):     # 3.1.0 : variables communes, absentes par défaut
+        monkeypatch.delenv(k, raising=False)
     module = charger()
     module.ETAT["attente"] = False      # pas d'attente d'une seconde après chaque connexion
 
@@ -584,3 +586,90 @@ def test_ecritures_simultanees(app):
     lignes = app.LOG_FILE.read_text(encoding="utf-8").splitlines()
     assert lignes[0].startswith("horodatage;") and len(lignes) == 1 + 4 * 200
     assert not list(app.DATA_DIR.glob(".*.tmp"))          # aucun fichier temporaire oublié
+
+
+# ================================================================ 3.1.0 : variables communes de la maison
+
+def test_310_module_maison_copie_non_retouchee():
+    from app import maison
+    assert maison.empreinte_calculee() == maison.empreinte_ecrite()
+
+
+def test_310_mot_de_passe_commun_puis_repli(app, monkeypatch):
+    """MAISON_PASSWORD l'emporte ; sans lui, VERIF_PASSWORD (la stack actuelle) ; sans aucun, rien ne s'ouvre."""
+    assert app.PASSWORD == MDP                                   # stack actuelle : VERIF_PASSWORD seul
+    monkeypatch.setenv("MAISON_PASSWORD", "mot-de-passe-commun")
+    module = charger()
+    module.ETAT["attente"] = False
+    assert module.PASSWORD == "mot-de-passe-commun"
+    c = TestClient(module.app)
+    assert c.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 401
+    assert c.post("/api/connexion", json={"mot_de_passe": "mot-de-passe-commun"}).status_code == 200
+    assert c.get("/api/etat").status_code == 200
+    monkeypatch.delenv("MAISON_PASSWORD")
+    monkeypatch.delenv("VERIF_PASSWORD")
+    module = charger()
+    r = TestClient(module.app).get("/api/etat")
+    assert r.status_code == 503 and "MAISON_PASSWORD (ou VERIF_PASSWORD)" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("maison_ls,propre,attendu,origine", [
+    (None, None, False, ""),
+    (None, "oui", True, "appli"),
+    (None, "1", True, "appli"),              # valeurs acceptées avant la 3.1.0
+    (None, "true", True, "appli"),
+    (None, "yes", True, "appli"),
+    ("oui", None, True, "maison"),
+    ("oui", "", True, "maison"),             # variable de la stack posée vide : la maison décide
+    ("oui", "non", False, ""),               # l'appli forcée en écriture malgré la maison
+    ("non", "oui", True, "appli"),
+    ("", "", False, ""),
+])
+def test_310_lecture_seule_maison_et_forcage(app, monkeypatch, maison_ls, propre, attendu, origine):
+    for nom, valeur in (("MAISON_LECTURE_SEULE", maison_ls), ("VERIF_LECTURE_SEULE", propre)):
+        if valeur is None:
+            monkeypatch.delenv(nom, raising=False)
+        else:
+            monkeypatch.setenv(nom, valeur)
+    module = charger()
+    assert module.LECTURE_SEULE is attendu and module.ORIGINE_LECTURE_SEULE == origine
+    c = TestClient(module.app)
+    c.post("/api/connexion", json={"mot_de_passe": MDP})
+    s = c.get("/api/session").json()
+    assert s["lecture_seule"] is attendu and s["lecture_seule_origine"] == origine
+    e = etat(c)
+    assert e["lecture_seule"] is attendu and e["lecture_seule_origine"] == origine
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")
+def test_310_lecture_seule_de_la_maison_aucun_fichier_ne_bouge(app, monkeypatch):
+    """Preuve sans retouche du module : MAISON_LECTURE_SEULE=oui dans l'environnement suffit à tout refuser,
+    à l'adresse comme dans chaque fonction qui touche à un fichier."""
+    monkeypatch.setenv("MAISON_LECTURE_SEULE", "oui")
+    module = charger()
+    module.ETAT["attente"] = False
+    dossier = module.SCAN_DIR / "2019" / "2019-07-14 Mariage"
+    dossier.mkdir(parents=True)
+    photo = dossier / "a.jpg"
+    Image.new("RGB", (30, 30), "blue").save(photo)
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-DateTimeOriginal=2010:01:01 10:00:00", str(photo)], check=True)
+    module.scan_worker()
+    it = next(i for i in module.STATE["items"] if i["name"] == "a.jpg")
+    assert it["status"] == "écart" and it["proposed"]
+    avant = _empreintes(module.SCAN_DIR)
+    c = TestClient(module.app)
+    assert c.post("/api/connexion", json={"mot_de_passe": MDP}).status_code == 200
+    e = etat(c)
+    assert e["lecture_seule"] is True and e["lecture_seule_origine"] == "maison"
+    r = corriger(c, (it["id"], it["proposed"]))
+    assert r.status_code == 409 and "lecture seule" in r.json()["detail"]
+    assert c.post("/api/renommer", json={"folder": "2019/2019-07-14 Mariage", "nouveau": "2010/2010-01-01 Autre"}).status_code == 409
+    assert c.post("/api/realigner").status_code == 409
+    for ecrire in (lambda: module.write_date(it, module.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: module.write_date_robust(it, module.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: module.convert_and_date(it, module.dt.datetime(2019, 7, 14, 10, 0)),
+                   lambda: module.rename_to_real_ext(it, "png"), lambda: module.strip_jpeg_header(it),
+                   lambda: module.realign_worker([str(photo)])):
+        with pytest.raises(module.LectureSeule):
+            ecrire()
+    assert _empreintes(module.SCAN_DIR) == avant and dossier.is_dir()

@@ -364,6 +364,7 @@ def etat_complet():
         "corrigees": [{"nom": f, "photos": rs} for f, rs in corrigees.items()],
         "tolerance": R.TOLERANCE_DAYS, "has_cache": R.CACHE_FILE.exists(),
         "originals_dir": bool(R.ORIGINALS_DIR), "lecture_seule": R.LECTURE_SEULE,
+        "lecture_seule_origine": R.ORIGINE_LECTURE_SEULE,
         "dossier": R.SCAN_DIR.name, "dossier_present": R.SCAN_DIR.is_dir(),
         "immich_configure": I.immich_enabled(),
         "a_realigner": 0 if state.get("running") else len(videos_a_realigner()),

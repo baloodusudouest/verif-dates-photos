@@ -36,7 +36,7 @@ def noter_journal(ligne):
 
 
 class LectureSeule(RuntimeError):
-    """Écriture refusée : l'outil tourne en lecture seule (VERIF_LECTURE_SEULE)."""
+    """Écriture refusée : l'outil tourne en lecture seule (VERIF_LECTURE_SEULE, ou MAISON_LECTURE_SEULE depuis la 3.1.0)."""
 
 
 def exiger_ecriture():

@@ -12,6 +12,8 @@ def test_icone_sans_session(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("VERIF_PASSWORD", "mot-de-passe-essai")
+    for k in ("MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):     # 3.1.0 : seules les variables du test
+        monkeypatch.delenv(k, raising=False)
     module = charger()
     c = TestClient(module.app)                        # client nu : aucune session
     for nom, sorte in (("icone.svg", "image/svg+xml"), ("icone-180.png", "image/png"), ("manifest.webmanifest", "application/manifest+json")):

@@ -19,7 +19,7 @@
       <dt class="text-muted-foreground">Dernière analyse</dt><dd>{e.scanned_at || 'jamais'}</dd>
       {#if e.scanned_at}<dt class="text-muted-foreground">Fichiers</dt><dd>{e.stats.fichiers}, dont {e.stats.ok} sans rien à signaler</dd>{/if}
       <dt class="text-muted-foreground">Écriture</dt>
-      <dd>{e.lecture_seule ? 'lecture seule : aucun fichier n’est modifié' : 'les dates sont écrites dans les fichiers, sur validation'}</dd>
+      <dd>{e.lecture_seule ? 'lecture seule (' + (e.lecture_seule_origine === 'maison' ? 'toute la maison' : 'cette appli') + ') : aucun fichier n’est modifié' : 'les dates sont écrites dans les fichiers, sur validation'}</dd>
     </dl>
   </section>
   <section class="rounded-2xl border bg-card p-5">

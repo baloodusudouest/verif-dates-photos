@@ -21,6 +21,8 @@ def test_connexion_commune(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("VERIF_PASSWORD", MDP)
+    for k in ("MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):     # 3.1.0 : seules les variables du test
+        monkeypatch.delenv(k, raising=False)
     module = charger()
     dans_une_heure = int(time.time()) + 3600
 

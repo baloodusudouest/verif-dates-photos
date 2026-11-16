@@ -4,8 +4,9 @@ Nom d'appli depuis la 2.0.1 : **Éphéméride**. Noms techniques inchangés (`ve
 
 Fichier à lire en premier dans une nouvelle session, et à mettre à jour à chaque fin de session, dans le même commit que le code.
 
-## État (15/11/2026)
+## État (16/11/2026)
 
+- **3.1.0** (16/11/2026) : variables communes (module `app/maison.py`, copie du socle 0.5.0 : ne pas le modifier ici, `python tools/diffuser_maison.py ../verif-dates-photos` depuis le socle). `app/reglages.py` lit `PASSWORD = maison.mot_de_passe("VERIF_PASSWORD")`, `LECTURE_SEULE = maison.lecture_seule("VERIF_LECTURE_SEULE")` et `ORIGINE_LECTURE_SEULE` (« appli », « maison » ou « »), renvoyée par `/api/session` et `/api/etat` (`lecture_seule_origine`) et affichée dans Réglages, Connexion et le bandeau d'À traiter. Pas de jeton entre applis ni d'annuaire (aucun lien navigateur vers Immich). Jamais essayé sur la vraie installation : les nouvelles variables ne sont pas encore dans la stack (tout passe par `VERIF_PASSWORD` / `VERIF_LECTURE_SEULE`).
 - **3.0.0** (15/11/2026) : format du socle. `app/main.py` (FastAPI, garde, routes `/api/…`), `app/auth.py` (repris du socle), interface Svelte dans `frontend/` compilée vers `app/static` (non suivi par git ; l'image la compile). Lancement : `uvicorn app.main:app` (port `PORT`, 8099). `app/web.py` et Flask sont retirés ; ce que faisaient ses routes est dans `actions.py` (`lancer_analyse`, `lancer_corrections`, `lancer_realignement`, `valider_dossier`, `renommer_dossier`, `progression`, `etat_complet`), refus par l'exception `Refus` (message, code HTTP). Version dans `app/__init__.py` **et** `frontend/package.json`.
 - **2.2.0** (15/11/2026) : `app/app.py` découpé en modules (`app/reglages.py`, `etat.py`, `dates.py`, `exif.py`, `immich.py`, `analyse.py`, `actions.py`), version dans `app/__init__.py`. Les modules s'appellent **par le module** (`X.write_date`, `R.DATA_DIR`), jamais par `from … import nom` : c'est ce qui permet aux tests (`tests/outil.py`) et au rechargement de remplacer un nom partout.
 - **2.1.2** (15/11/2026) : verrou d'écriture (`ECRITURE`, `ecrire_json`, `noter_journal` dans `app/etat.py`) pour les fichiers d'état et le journal. Test `test_ecritures_simultanees`.
@@ -20,9 +21,10 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 Faits par Julien (15/11/2026) : mise en service 2.1.x et connexion commune avec l'Anneau essayées, vidéos de New York réalignées, sauvegarde vérifiée de la Pellicule, dossier témoin contrôlé dans Immich.
 
-1. Mettre la 3.0.0 en service : Portainer › Recreate + Re-pull de `verif_dates_photos`, se reconnecter une fois (ou passer par l'Anneau). Conseillé pour le premier jour : `VERIF_LECTURE_SEULE=oui`, vérifier l'écran sur PC et iPhone, puis retirer la variable.
+1. Mettre la 3.1.0 (ou la 3.0.0) en service : Portainer › Recreate + Re-pull de `verif_dates_photos`, sans toucher aux variables, se reconnecter une fois (ou passer par l'Anneau). Conseillé pour le premier jour : `VERIF_LECTURE_SEULE=oui`, vérifier l'écran sur PC et iPhone, puis retirer la variable.
 2. À essayer sur la vraie installation (jamais fait) : une correction réelle depuis la nouvelle interface, le renommage d'un dossier, la conversion d'un vrai `.MTS` de caméscope, la tuile de l'Anneau avec la sonde `/health`.
-3. Retour arrière si besoin : étiquette `:2.2.0` dans la stack.
+3. Retour arrière si besoin : étiquette `:3.0.0` (ou `:2.2.0`) dans la stack.
+4. Quand la stack aura `MAISON_PASSWORD` (et éventuellement `MAISON_LECTURE_SEULE`) : vérifier la connexion et l'affichage de la lecture seule, puis retirer `VERIF_PASSWORD`.
 
 ## Décisions tranchées
 
@@ -42,4 +44,5 @@ Faits par Julien (15/11/2026) : mise en service 2.1.x et connexion commune avec 
 - Les tests ont besoin d'exiftool et de ffmpeg ; sans exiftool, la plupart sont sautés sans bruit. Sur GitHub ils tournent dans l'image.
 - Le client de test ouvre la session tout seul (`tests/test_dates.py`, fixture `app`) : un test qui veut un visiteur sans session crée un `TestClient(app.app)` nu. Les tests coupent l'attente après un mot de passe faux (`ETAT["attente"] = False`).
 - Revenir à une ancienne image ne rend pas les fichiers modifiés.
-- Sans `VERIF_PASSWORD`, rien ne s'ouvre (3.0.0 : le conteneur démarre, mais toute adresse `/api/…` répond 503 ; avant la 3.0, il s'arrêtait).
+- 3.1.0 : `MAISON_LECTURE_SEULE=oui` dans la stack met aussi cet outil en lecture seule (sauf `VERIF_LECTURE_SEULE=non`). Les tests effacent `MAISON_PASSWORD` et `MAISON_LECTURE_SEULE` dans leurs fixtures (et `tests/interface/serveur.py`) : un test qui en a besoin les pose lui-même.
+- Sans `MAISON_PASSWORD` ni `VERIF_PASSWORD`, rien ne s'ouvre (3.0.0 : le conteneur démarre, mais toute adresse `/api/…` répond 503 ; avant la 3.0, il s'arrêtait).

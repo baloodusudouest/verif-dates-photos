@@ -14,7 +14,7 @@ from PIL import Image
 dossier, port = Path(sys.argv[1]), int(sys.argv[2])
 os.environ.update({"LOCAL_ROOT": str(dossier / "photos"), "DATA_DIR": str(dossier / "data"), "TZ": "Europe/Paris",
                    "VERIF_PASSWORD": "essai", "PORT": str(port)})
-for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT", "VERIF_LECTURE_SEULE"):
+for k in ("IMMICH_URL", "IMMICH_API_KEY", "IMMICH_ROOT", "VERIF_LECTURE_SEULE", "MAISON_PASSWORD", "MAISON_LECTURE_SEULE"):
     os.environ.pop(k, None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from outil import charger  # noqa: E402

@@ -105,7 +105,7 @@
 
 {#if e.lecture_seule}
   <p class="mb-4 rounded-xl border border-[var(--ecart)] bg-card px-4 py-2.5" role="status">
-    <strong>Mode lecture seule.</strong> L'outil analyse et propose des dates, mais ne modifie, ne déplace et ne supprime aucun fichier (VERIF_LECTURE_SEULE).
+    <strong>Mode lecture seule.</strong> L'outil analyse et propose des dates, mais ne modifie, ne déplace et ne supprime aucun fichier ({e.lecture_seule_origine === 'maison' ? 'toute la maison : MAISON_LECTURE_SEULE' : 'cette appli : VERIF_LECTURE_SEULE'}).
   </p>
 {/if}
 {#if e.error}<p class="ko mb-4 rounded-xl border bg-card px-4 py-2.5 font-semibold">Erreur : {e.error}</p>{/if}

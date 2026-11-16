@@ -18,7 +18,7 @@
     <dt class="text-muted-foreground">Tolérance</dt><dd>{e.tolerance} jour(s) entre la date de la photo et celle du dossier (TOLERANCE_DAYS)</dd>
     <dt class="text-muted-foreground">Vidéos converties</dt>
     <dd>{e.originals_dir ? 'l’original est gardé à part (ORIGINALS_DIR)' : 'l’original est supprimé après vérification du MP4 (régler ORIGINALS_DIR pour le garder)'}</dd>
-    <dt class="text-muted-foreground">Lecture seule</dt><dd>{e.lecture_seule ? 'oui (VERIF_LECTURE_SEULE)' : 'non'}</dd>
+    <dt class="text-muted-foreground">Lecture seule</dt><dd>{e.lecture_seule ? (e.lecture_seule_origine === 'maison' ? 'oui, pour toute la maison (MAISON_LECTURE_SEULE)' : 'oui, pour cette appli (VERIF_LECTURE_SEULE)') : 'non'}</dd>
   </dl>
 </section>
 

@@ -1,4 +1,4 @@
-"""Éphéméride 3.0.0 : API FastAPI et interface Svelte compilée (format commun du socle).
+"""Éphéméride 3.0.0 (3.1.0 : variables communes, voir reglages) : API FastAPI et interface Svelte compilée (format commun du socle).
 
 Routes publiques : /health, les icônes, /api/session, /api/connexion. Tout le reste demande la session
 (cookie de l'appli, ou cookie commun « maison_session » posé par l'Anneau). Les fonctions qui lisent et
@@ -26,7 +26,7 @@ ICI = Path(__file__).parent
 STATIQUE = ICI / "static"
 ICONES = {"icone.svg": "image/svg+xml", "icone-180.png": "image/png", "icone-512.png": "image/png",
           "manifest.webmanifest": "application/manifest+json"}
-SANS_MOT_DE_PASSE = "Variable VERIF_PASSWORD absente : à définir dans la stack (même valeur que CARNET_PASSWORD)."
+SANS_MOT_DE_PASSE = "Variable MAISON_PASSWORD (ou VERIF_PASSWORD) absente : à définir dans la stack."
 ETAT: dict = {"attente": True}   # les tests coupent l'attente après un mauvais mot de passe
 
 
@@ -105,7 +105,7 @@ def sante():
 @app.get("/api/session")
 def session(request: Request):
     return {"connecte": sessions().connecte(request.cookies), "version": __version__,
-            "lecture_seule": R.LECTURE_SEULE}
+            "lecture_seule": R.LECTURE_SEULE, "lecture_seule_origine": R.ORIGINE_LECTURE_SEULE}
 
 
 @app.post("/api/connexion")

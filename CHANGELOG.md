@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 3.1.0 — 16 novembre 2026
+- **Variables communes de la maison** (module `app/maison.py` du socle 0.5.0, copié tel quel) :
+  - mot de passe : `MAISON_PASSWORD`, repli sur `VERIF_PASSWORD` ; sans l'un ni l'autre, rien ne s'ouvre, comme avant ;
+  - lecture seule : `MAISON_LECTURE_SEULE=oui` met aussi cet outil en lecture seule ; `VERIF_LECTURE_SEULE`, si elle dit oui ou non, l'emporte (« 1 », « true », « yes » restent acceptés). Réglages, Connexion et le bandeau d'À traiter disent si la lecture seule vient de toute la maison ou de cette appli.
+- Pas de jeton entre applis maison ni de lien vers une autre appli dans cet outil : rien d'autre ne change.
+- Rien ne change tant que la stack n'a pas les nouvelles variables : `VERIF_PASSWORD` et `VERIF_LECTURE_SEULE` restent lues.
+- Tests : copie du module non retouchée, mot de passe commun puis repli, lecture seule de la maison et forçage par l'appli, et preuve qu'avec `MAISON_LECTURE_SEULE=oui` aucun octet ni aucune date de fichier ne bouge (adresses et fonctions d'écriture). 42 tests de l'outil et 6 tests d'écran passent.
+
 ## 3.0.0 — 15 novembre 2026
 **Format commun du socle : FastAPI pour le serveur, Svelte 5 et Tailwind 4 pour l'interface.** Deuxième des deux livraisons choisies par Julien. Les règles de dates, les écritures dans les fichiers et les fichiers d'état sont ceux de la 2.2.0 : les modules `dates`, `exif`, `analyse` et `etat` n'ont pas changé, et ce que faisaient les adresses Flask (lancer une analyse, corriger, réaligner, valider ou renommer un dossier) est passé tel quel dans `actions.py`.
 - **Serveur FastAPI** (`app/main.py`) lancé par Uvicorn ; Flask et `app/web.py` sont retirés. Adresses : `/api/etat`, `/api/progression`, `/api/analyse`, `/api/corriger`, `/api/realigner`, `/api/valider`, `/api/renommer`, `/api/miniature/…`, `/api/journal.csv`. Publiques : `/health`, les icônes, `/api/session`, `/api/connexion`.
