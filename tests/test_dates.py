@@ -675,3 +675,23 @@ def test_310_lecture_seule_de_la_maison_aucun_fichier_ne_bouge(app, monkeypatch)
         with pytest.raises(module.LectureSeule):
             ecrire()
     assert _empreintes(module.SCAN_DIR) == avant and dossier.is_dir()
+
+
+def test_duree_illisible_garde_l_original(app, monkeypatch):
+    """3.2.1 (audit du 17/11/2026) : sans durée lisible de la source, l'original n'est jamais supprimé."""
+    exif = app.module_de("remux_mp4")
+    dossier = app.SCAN_DIR / "2016" / "2016-01-01 Essai"
+    dossier.mkdir(parents=True)
+    src = dossier / "clip.mts"
+    src.write_bytes(b"pas vraiment une video")
+
+    def faux_remux(s, dst):
+        dst.write_bytes(b"mp4")
+        return "copie sans perte", ""
+    monkeypatch.setattr(exif, "remux_mp4", faux_remux)
+    monkeypatch.setattr(exif, "probe_duration", lambda p: None if p.suffix == ".mts" else 12.0)
+    monkeypatch.setattr(app.module_de("ORIGINALS_DIR"), "ORIGINALS_DIR", "")
+    it = {"path": str(src), "has_creationdate": False}
+    ok, msg, new = exif.convert_and_date(it, app.dt.datetime(2016, 1, 1, 12, 0))
+    assert not ok and "original conservé" in msg
+    assert src.exists() and not list(dossier.glob("*.mp4")) and not list(dossier.glob(".*.mp4"))

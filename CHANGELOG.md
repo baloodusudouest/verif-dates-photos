@@ -1,5 +1,12 @@
 # Journal des versions
 
+## 3.2.1 — 17 novembre 2026 (corrections de l'audit)
+- **Sécurité des originaux** : à la conversion d'une vidéo (AVI, MTS, MKV) en MP4, l'original était supprimé même si la durée de la source n'avait pas pu être lue (le contrôle était alors sauté), et la tolérance de 1 % laissait passer 36 s manquantes sur une heure. Maintenant, sans durée lisible des deux côtés, la conversion est refusée et l'original reste ; tolérance resserrée à 1 s ou 0,2 %. Conseil : poser `ORIGINALS_DIR` dans la stack pour garder chaque original converti.
+- ffmpeg et ffprobe ont un délai maximal : un fichier abîmé ne laisse plus la tâche « en cours » pour toujours.
+- Le `.xmp` d'un original converti n'écrase plus un `.xmp` déjà présent à côté du MP4.
+- **Bug** : l'état des fichiers corrigés pouvait perdre une ligne quand plusieurs écritures se croisaient (photographie et écriture sous deux verrous différents) ; c'était la cause de l'échec intermittent de `test_ecritures_simultanees`.
+- Tests : un de plus (durée illisible).
+
 ## 3.2.0 — 16 novembre 2026
 - **Les réglages passent dans l'appli** : le dossier analysé (`sous_dossier`, « Pellicule » par défaut) et la tolérance (`tolerance_jours`, 1 jour par défaut) se changent dans l'écran **Réglages**, sans redémarrer. Ils sont gardés dans `/data/reglages.json`. Au premier démarrage, ils sont repris une fois des anciennes variables `SCAN_SUBDIR` et `TOLERANCE_DAYS` si elles sont encore dans la stack (une ligne au journal `corrections.csv` pour chacun) ; ensuite ces variables ne sont plus lues. Chaque changement est noté au journal. Pas de changement pendant une analyse ou une correction.
 - **Sauvegarde pour l'Anneau** : `GET /externe/sauvegarde` rend ces réglages et la version (contrat de sauvegarde 1). La porte ne s'ouvre qu'au jeton commun `MAISON_JETON` ; sans lui, elle reste fermée. Jamais de variable, de chemin ni de secret dans la réponse ; les renseignements fixés par la stack (lecture seule, originaux gardés) n'en sortent jamais.

@@ -213,11 +213,11 @@ def file_sig(path: Path):
 
 
 def probe_duration(path: Path):
-    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
-                       capture_output=True, text=True)
     try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, timeout=120)
         return float(p.stdout.strip())
-    except ValueError:
+    except (ValueError, subprocess.TimeoutExpired):
         return None
 
 
@@ -234,7 +234,11 @@ def remux_mp4(src: Path, dst: Path):
     derniere = ""
     for libelle, opts in essais:
         dst.unlink(missing_ok=True)
-        p = subprocess.run(base + opts + [str(dst)], capture_output=True, text=True)
+        try:   # 3.2.1 : un fichier abîmé ne bloque plus la tâche « en cours » pour toujours
+            p = subprocess.run(base + opts + [str(dst)], capture_output=True, text=True, timeout=4 * 3600)
+        except subprocess.TimeoutExpired:
+            derniere = "ffmpeg n'a pas fini en 4 h"
+            continue
         if p.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
             return libelle, ""
         derniere = (p.stderr or "").strip().splitlines()[-1:] or ["échec ffmpeg"]
@@ -257,9 +261,13 @@ def convert_and_date(item, nd: dt.datetime):
     if not mode:
         return False, f"conversion MP4 impossible : {err}", None
     d_src, d_tmp = probe_duration(src), probe_duration(tmp)
-    if d_src and (not d_tmp or abs(d_src - d_tmp) > max(1.0, d_src * 0.01)):
+    # 3.2.1 (audit du 17/11/2026) : sans durée lisible des deux côtés, pas de suppression de l'original ;
+    # tolérance resserrée (1 % laissait passer 36 s manquantes sur une heure).
+    if not d_src or not d_tmp or abs(d_src - d_tmp) > max(1.0, d_src * 0.002):
         tmp.unlink(missing_ok=True)
-        return False, f"durée différente après conversion ({d_src:.1f} s → {d_tmp or 0:.1f} s) : original conservé", None
+        if not d_src or not d_tmp:
+            return False, "durée illisible avant ou après conversion : original conservé", None
+        return False, f"durée différente après conversion ({d_src:.1f} s → {d_tmp:.1f} s) : original conservé", None
     tmp_item = dict(item, path=str(tmp), has_creationdate=False)
     ok, msg = write_date(tmp_item, nd)
     if ok:
@@ -271,8 +279,9 @@ def convert_and_date(item, nd: dt.datetime):
     os.utime(final, (nd.timestamp(), nd.timestamp()))
     # sidecar éventuel de l'original : suit la vidéo
     for sc in (Path(str(src) + ".xmp"), src.with_suffix(".xmp")):
-        if sc.exists():
-            sc.rename(Path(str(final) + ".xmp"))
+        cible = Path(str(final) + ".xmp")
+        if sc.exists() and not cible.exists():      # 3.2.1 : n'écrase plus un .xmp déjà là
+            sc.rename(cible)
     if R.ORIGINALS_DIR:
         dest = Path(R.ORIGINALS_DIR) / src.relative_to(R.LOCAL_ROOT)
         dest.parent.mkdir(parents=True, exist_ok=True)

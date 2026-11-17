@@ -142,9 +142,10 @@ def load_corrected():
 
 
 def save_corrected():
+    # 3.2.1 : photographie et écriture sous le même verrou ; sinon une photographie ancienne pouvait
+    # écraser une plus récente (échec intermittent de test_ecritures_simultanees)
     with LOCK:
-        texte = json.dumps(CORRECTED, ensure_ascii=False)
-    ecrire_json(R.CORRECTED_FILE, texte)
+        ecrire_json(R.CORRECTED_FILE, json.dumps(CORRECTED, ensure_ascii=False))
 
 
 def cache_params():
