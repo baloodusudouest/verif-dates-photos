@@ -13,7 +13,7 @@ MDP = "mot-de-passe-essai"
 
 
 def cookie(mot_de_passe, expire):
-    cle = hashlib.sha256(b"maison-session|" + mot_de_passe.encode()).digest()
+    cle = hashlib.pbkdf2_hmac("sha256", mot_de_passe.encode(), b"maison-session|", 200_000)   # contrat commun depuis le 17/11/2026
     return f"{expire}.{hmac.new(cle, str(expire).encode(), hashlib.sha256).hexdigest()}"
 
 

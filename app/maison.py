@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import contextlib
 import json
+import math
 import os
 import threading
 import time
@@ -159,9 +161,11 @@ class Annuaire:
                 try:
                     self._services = {cle(s["nom"]): s for s in self._lire()}
                     self.erreur = ""
+                    self._quand = time.monotonic()
                 except Exception as exc:                          # noqa: BLE001 — l'annuaire ne doit rien casser
                     self.erreur = f"Anneau injoignable ({exc.__class__.__name__})"
-                self._quand = time.monotonic()
+                    # nouvel essai 30 s plus tard (avant : 10 min sans adresses après un redémarrage de la stack)
+                    self._quand = time.monotonic() - max(0.0, self.duree - 30)
             return dict(self._services)
 
     def adresse(self, nom: str, prive: bool = False, repli: str = "") -> str:
@@ -209,9 +213,17 @@ def _meme_type(valeur, modele):
     if isinstance(modele, int) and not isinstance(modele, bool):
         if isinstance(valeur, bool):
             raise ValueError("nombre entier attendu")
-        return int(valeur)
+        if isinstance(valeur, float) and (not math.isfinite(valeur) or valeur != int(valeur)):
+            raise ValueError("nombre entier attendu")
+        try:
+            return int(valeur)
+        except OverflowError as exc:
+            raise ValueError("nombre entier attendu") from exc
     if isinstance(modele, float):
-        return float(valeur)
+        v = float(valeur)
+        if not math.isfinite(v):           # nan ou inf cassaient l'écran et la sauvegarde pour de bon
+            raise ValueError("nombre fini attendu")
+        return v
     if isinstance(modele, list):
         if isinstance(valeur, str):
             return _convertir(valeur, modele)
@@ -242,7 +254,12 @@ class Reglages:
             donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
             if not isinstance(donnees, dict):
                 donnees = {}
-        except (OSError, ValueError):
+        except ValueError:
+            # fichier abîmé : mis de côté (.corrompu) au lieu d'être écrasé sans copie
+            with contextlib.suppress(OSError):
+                os.replace(self.chemin, self.chemin.with_suffix(".corrompu"))
+            donnees = {}
+        except OSError:
             donnees = {}
         change = False
         for k, defaut in self.defauts.items():
@@ -351,4 +368,4 @@ def empreinte_calculee(chemin: str | Path | None = None) -> str:
 def empreinte_ecrite(chemin: str | Path | None = None) -> str:
     texte = Path(chemin or __file__).read_text(encoding="utf-8")
     return texte.rsplit("\n# empreinte: ", 1)[-1].strip() if "\n# empreinte: " in texte else ""
-# empreinte: 7d1bfc0a9a1ac067
+# empreinte: 7fe6f9a9e32d2c40
