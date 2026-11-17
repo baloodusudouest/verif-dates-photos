@@ -135,6 +135,30 @@ def est_prive(hote: str) -> bool:
     return len(morceaux) == 4 and morceaux[0] == "100" and morceaux[1].isdigit() and 64 <= int(morceaux[1]) <= 127
 
 
+_ANNUAIRE: "Annuaire | None" = None
+AGE_GENERATION = 60                 # secondes : la génération commune est relue au plus toutes les minutes
+_FOURNISSEUR_GENERATION = None      # l'Anneau donne la sienne directement (definir_generation_commune)
+
+
+def definir_generation_commune(fournisseur) -> None:
+    """0.8.0 : pour l'Anneau, qui tient la génération lui-même au lieu de la lire dans son annuaire."""
+    global _FOURNISSEUR_GENERATION
+    _FOURNISSEUR_GENERATION = fournisseur
+
+
+def generation_commune() -> int | None:
+    """0.8.0 : génération actuelle du cookie commun « maison_session » ; None si inconnue (l'Anneau ne répond
+    pas, ou pas de jeton commun) : le cookie est alors accepté comme avant, pour ne rien casser."""
+    if _FOURNISSEUR_GENERATION is not None:
+        return _FOURNISSEUR_GENERATION()
+    annuaire = _ANNUAIRE
+    if annuaire is None:
+        if not jeton_a_envoyer():
+            return None
+        annuaire = Annuaire()
+    return annuaire.generation_sans_attendre()
+
+
 class Annuaire:
     """Adresses des services, lues dans l'Anneau (GET /externe/services, jeton commun), gardées dix minutes.
     L'Anneau ne répond pas : dernières adresses connues, puis l'adresse de repli donnée par l'appli."""
@@ -148,25 +172,44 @@ class Annuaire:
         self._quand: float | None = None
         self._verrou = threading.Lock()
         self.erreur = ""
+        self.generation_commune: int | None = None     # 0.8.0 : génération du cookie commun, publiée par l'Anneau
+        global _ANNUAIRE
+        _ANNUAIRE = self
 
-    def _lire_http(self) -> list[dict]:
+    def _lire_http(self) -> dict:
         demande = urllib.request.Request(self.url + "/externe/services",
                                          headers={"Authorization": f"Bearer {self.jeton}"})
         with urllib.request.urlopen(demande, timeout=5) as r:      # noqa: S310 (adresse de la stack)
-            return json.loads(r.read().decode())["services"]
+            return json.loads(r.read().decode())          # {"services": [...], "generation_commune": n}
 
-    def services(self) -> dict[str, dict]:
+    def services(self, age_max: float | None = None) -> dict[str, dict]:
+        limite = self.duree if age_max is None else age_max
         with self._verrou:
-            if self.jeton and (self._quand is None or time.monotonic() - self._quand > self.duree):
+            if self.jeton and (self._quand is None or time.monotonic() - self._quand > limite):
                 try:
-                    self._services = {cle(s["nom"]): s for s in self._lire()}
+                    lu = self._lire()
+                    if isinstance(lu, dict):
+                        g = lu.get("generation_commune")
+                        self.generation_commune = g if isinstance(g, int) and not isinstance(g, bool) else None
+                        lu = lu.get("services") or []
+                    self._services = {cle(s["nom"]): s for s in lu}
                     self.erreur = ""
                     self._quand = time.monotonic()
                 except Exception as exc:                          # noqa: BLE001 — l'annuaire ne doit rien casser
                     self.erreur = f"Anneau injoignable ({exc.__class__.__name__})"
                     # nouvel essai 30 s plus tard (avant : 10 min sans adresses après un redémarrage de la stack)
-                    self._quand = time.monotonic() - max(0.0, self.duree - 30)
+                    self._quand = time.monotonic() - max(0.0, limite - 30)
             return dict(self._services)
+
+    def generation_sans_attendre(self) -> int | None:
+        """0.8.0 : dernière génération connue, sans jamais faire attendre une requête : si elle est trop vieille,
+        elle est relue en arrière-plan (au plus une minute de retard après « Se déconnecter » dans l'Anneau).
+        None tant qu'on ne la connaît pas (l'Anneau ne répond pas)."""
+        age_max = min(self.duree, AGE_GENERATION)
+        if self.jeton and (self._quand is None or time.monotonic() - self._quand > age_max) \
+                and not self._verrou.locked():
+            threading.Thread(target=self.services, args=(age_max,), daemon=True, name="annuaire").start()
+        return self.generation_commune
 
     def adresse(self, nom: str, prive: bool = False, repli: str = "") -> str:
         """Adresse du service « nom » pour le navigateur : privée si la page vient du réseau privé et que
@@ -368,4 +411,4 @@ def empreinte_calculee(chemin: str | Path | None = None) -> str:
 def empreinte_ecrite(chemin: str | Path | None = None) -> str:
     texte = Path(chemin or __file__).read_text(encoding="utf-8")
     return texte.rsplit("\n# empreinte: ", 1)[-1].strip() if "\n# empreinte: " in texte else ""
-# empreinte: 7fe6f9a9e32d2c40
+# empreinte: 62b318a5831d093f

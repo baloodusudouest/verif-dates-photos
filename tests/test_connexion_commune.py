@@ -12,9 +12,10 @@ from outil import charger  # noqa: E402
 MDP = "mot-de-passe-essai"
 
 
-def cookie(mot_de_passe, expire):
+def cookie(mot_de_passe, expire, generation=0):
     cle = hashlib.pbkdf2_hmac("sha256", mot_de_passe.encode(), b"maison-session|", 200_000)   # contrat commun depuis le 17/11/2026
-    return f"{expire}.{hmac.new(cle, str(expire).encode(), hashlib.sha256).hexdigest()}"
+    corps = f"{generation}.{expire}"            # « génération.expiration.signature » depuis le 18/11/2026
+    return f"{corps}.{hmac.new(cle, corps.encode(), hashlib.sha256).hexdigest()}"
 
 
 def test_connexion_commune(tmp_path, monkeypatch):
@@ -45,3 +46,21 @@ def test_connexion_commune(tmp_path, monkeypatch):
     assert 'maison_session=""' in r.headers.get("set-cookie", "")    # « Se déconnecter » retire le cookie commun
     c.cookies.clear()
     assert c.get("/api/etat").status_code == 401
+
+
+def test_se_deconnecter_dans_l_anneau_revoque_le_cookie_commun(monkeypatch):
+    """Audit du 17/11/2026 : la génération commune tenue par l'Anneau change, les cookies communs d'avant ne valent plus."""
+    monkeypatch.setenv("MAISON_PASSWORD", MDP)
+    monkeypatch.delenv("MAISON_JETON", raising=False)
+    charger()
+    from app import maison
+    from app.auth import COMMUN, Sessions
+    s = Sessions("essai", MDP)
+    dans_une_heure = int(time.time()) + 3600
+    monkeypatch.setattr(maison, "generation_commune", lambda: 3)
+    assert s.connecte({COMMUN: cookie(MDP, dans_une_heure, 3)})
+    assert not s.connecte({COMMUN: cookie(MDP, dans_une_heure, 2)})                        # d'avant la déconnexion
+    assert not s.connecte({COMMUN: cookie(MDP, dans_une_heure, 2).replace("2.", "3.", 1)})  # génération retouchée
+    assert s.connecte({COMMUN: s.creer_commun()})                                           # nouveau cookie : génération 3
+    monkeypatch.setattr(maison, "generation_commune", lambda: None)                         # Anneau injoignable
+    assert s.connecte({COMMUN: cookie(MDP, dans_une_heure, 2)})

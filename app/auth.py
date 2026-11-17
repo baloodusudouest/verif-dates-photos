@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import time
 
+from . import maison
+
 DUREE = 30 * 86400
 COMMUN = "maison_session"   # cookie commun aux applis de la maison, posé par l'Anneau
 
@@ -85,14 +87,23 @@ class Sessions:
     def _signature_commune(self, corps: str) -> str:
         return hmac.new(self._cle_commune, corps.encode(), hashlib.sha256).hexdigest()
 
-    def creer_commun(self) -> str:
-        expire = str(int(time.time()) + DUREE)
-        return f"{expire}.{self._signature_commune(expire)}"
+    def creer_commun(self, generation: int | None = None) -> str:
+        """Cookie commun « génération.expiration.signature » (la génération est tenue par l'Anneau :
+        « Se déconnecter » dans l'Anneau l'augmente, et les cookies communs d'avant ne valent plus nulle part)."""
+        g = generation if generation is not None else (maison.generation_commune() or 0)
+        corps = f"{g}.{int(time.time()) + DUREE}"
+        return f"{corps}.{self._signature_commune(corps)}"
 
     def commun_valide(self, jeton: str | None) -> bool:
-        expire, _, signature = (jeton or "").partition(".")
-        return (expire.isdigit() and int(expire) > time.time()
-                and _egal(signature, self._signature_commune(expire)))
+        try:
+            generation, expire, signature = (jeton or "").split(".")
+        except ValueError:
+            return False
+        if not (generation.isdigit() and expire.isdigit() and int(expire) > time.time()
+                and _egal(signature, self._signature_commune(f"{generation}.{expire}"))):
+            return False
+        actuelle = maison.generation_commune()        # None : l'Anneau ne répond pas, le cookie reste accepté
+        return actuelle is None or int(generation) == actuelle
 
     def connecte(self, cookies) -> bool:
         """Connecté par le cookie de l'appli, ou par le cookie commun posé par l'Anneau."""
