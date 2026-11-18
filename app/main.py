@@ -24,7 +24,7 @@ from . import etat as E
 from . import immich as I
 from . import actions as C
 from . import maison
-from .auth import COMMUN, DUREE, Sessions
+from .auth import COMMUN, DUREE, Sessions, en_https
 
 APPLI = "verif_dates"          # cookie « verif_dates_session »
 PUBLIQUES = ("/api/connexion", "/api/session")
@@ -125,14 +125,14 @@ def session(request: Request):
 
 
 @app.post("/api/connexion")
-async def connexion(corps: dict = Body(...)):
+async def connexion(request: Request, corps: dict = Body(...)):
     s = sessions()
     if ETAT["attente"]:
         await asyncio.sleep(s.attente())
     if not s.verifier_mot_de_passe(str(corps.get("mot_de_passe", ""))):
         raise HTTPException(401, "Mot de passe incorrect.")
     r = JSONResponse({"ok": True})
-    r.set_cookie(s.cookie, s.creer(), max_age=DUREE, httponly=True, samesite="strict")
+    r.set_cookie(s.cookie, s.creer(), max_age=DUREE, httponly=True, samesite="strict", secure=en_https(request))
     return r
 
 

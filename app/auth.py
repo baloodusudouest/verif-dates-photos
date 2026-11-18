@@ -108,3 +108,14 @@ class Sessions:
     def connecte(self, cookies) -> bool:
         """Connecté par le cookie de l'appli, ou par le cookie commun posé par l'Anneau."""
         return self.valide(cookies.get(self.cookie)) or self.commun_valide(cookies.get(COMMUN))
+
+
+def en_https(request) -> bool:
+    """La page est-elle servie en https ? Directement, ou derrière un relais (Tailscale Serve) qui le dit par
+    X-Forwarded-Proto, ou, à défaut, d'après l'origine que le navigateur joint à la connexion. Vrai : les cookies
+    portent « Secure » et ne partent jamais en clair. Faux (adresse locale en http) : comme avant."""
+    if request.url.scheme == "https":
+        return True
+    if request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https":
+        return True
+    return request.headers.get("origin", "").lower().startswith("https://")
