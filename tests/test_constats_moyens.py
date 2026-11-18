@@ -31,7 +31,7 @@ def _photo(app, nom="2008-08-10-014136052.jpg"):
 @exiftool
 def test_une_ecriture_trop_longue_est_arretee_et_dite(app, monkeypatch):
     chemin = _photo(app)
-    monkeypatch.setattr(app, "DELAI_ECRITURE", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_ECRITURE"), "DELAI_ECRITURE", 0.001)
     ok, msg = app.write_date({"path": str(chemin)}, ND)
     assert ok is False and "n'a pas fini" in msg
 
@@ -39,7 +39,7 @@ def test_une_ecriture_trop_longue_est_arretee_et_dite(app, monkeypatch):
 @exiftool
 def test_une_relecture_trop_longue_est_un_echec_clair(app, monkeypatch):
     chemin = _photo(app)
-    monkeypatch.setattr(app, "DELAI_LECTURE", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_LECTURE"), "DELAI_LECTURE", 0.001)
     ok, msg = app.verify({"path": str(chemin)}, ND)
     assert ok is False and "n'a pas fini" in msg
 
@@ -47,8 +47,8 @@ def test_une_relecture_trop_longue_est_un_echec_clair(app, monkeypatch):
 @exiftool
 def test_un_lot_trop_long_nomme_le_fichier_qui_bloque(app, monkeypatch):
     chemins = [_photo(app, "IMG_20080810_014136.jpg"), _photo(app)]
-    monkeypatch.setattr(app, "DELAI_LOT", 0.001)
-    monkeypatch.setattr(app, "DELAI_LECTURE", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_LOT"), "DELAI_LOT", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_LECTURE"), "DELAI_LECTURE", 0.001)
     with pytest.raises(RuntimeError, match="ne finit pas de lire IMG_20080810_014136.jpg"):
         app.run_exiftool_files(chemins)
 
@@ -56,8 +56,8 @@ def test_un_lot_trop_long_nomme_le_fichier_qui_bloque(app, monkeypatch):
 @exiftool
 def test_l_analyse_bloquee_s_arrete_avec_une_erreur(app, monkeypatch):
     _photo(app)
-    monkeypatch.setattr(app, "DELAI_LOT", 0.001)
-    monkeypatch.setattr(app, "DELAI_LECTURE", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_LOT"), "DELAI_LOT", 0.001)
+    monkeypatch.setattr(app.module_de("DELAI_LECTURE"), "DELAI_LECTURE", 0.001)
     app.scan_worker()
     assert "ne finit pas de lire" in (app.STATE["error"] or "")
     assert app.STATE["running"] is False
@@ -116,6 +116,6 @@ def test_l_etat_est_ecrit_sous_le_verrou_de_sa_photographie(app, monkeypatch, sa
         vu.append(app.LOCK.locked())
         ecrire(path, texte)
 
-    monkeypatch.setattr(app, "ecrire_json", espion)
+    monkeypatch.setattr(app.module_de("ecrire_json"), "ecrire_json", espion)
     getattr(app, sauver)()
     assert vu == [True]
