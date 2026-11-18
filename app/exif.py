@@ -13,6 +13,23 @@ from . import reglages as R
 from . import etat as E
 from . import dates as D
 
+# 3.2.5 (audit du 17/11/2026, M46) : délai maximal de chaque appel à exiftool, selon ce qu'il fait.
+# ffmpeg et ffprobe ont le leur depuis la 3.2.1 (conversion : 4 h par essai ; durée : 120 s).
+DELAI_LECTURE = 120      # lire les dates d'un fichier
+DELAI_LOT = 900          # lire les dates d'un lot de R.CHUNK fichiers
+DELAI_ECRITURE = 900     # écrire une date : exiftool recopie tout le fichier (une longue vidéo prend du temps)
+
+
+class Delai(RuntimeError):
+    """exiftool n'a pas fini dans le temps donné (souvent un fichier abîmé)."""
+
+
+def _exiftool(cmd, delai, quoi):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=delai)
+    except subprocess.TimeoutExpired as exc:
+        raise Delai(f"exiftool n'a pas fini en {delai} s ({quoi}) : fichier abîmé ?") from exc
+
 
 def run_exiftool(target: Path, recursive: bool):
     cmd = ["exiftool", "-j", "-q", "-q", "-api", "QuickTimeUTC", "-d", R.FMT,
@@ -22,7 +39,7 @@ def run_exiftool(target: Path, recursive: bool):
     if recursive:
         cmd.append("-r")
     cmd.append(str(target))
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = _exiftool(cmd, DELAI_LOT if recursive else DELAI_LECTURE, f"lecture de {Path(target).name}")
     out = p.stdout.strip()
     if not out:
         return []
@@ -46,12 +63,19 @@ def list_files(on_progress=None):
     return files
 
 
-def _exiftool_list(paths, rapide):
+def _exiftool_list(paths, rapide, delai=None):
     argfile = R.DATA_DIR / "exiftool-args.txt"
     argfile.write_text("\n".join(str(x) for x in paths) + "\n", encoding="utf-8")
     cmd = ["exiftool", "-j", "-q", "-q", *(["-fast2"] if rapide else []), "-api", "QuickTimeUTC", "-d", R.FMT,
            "-charset", "filename=utf8", *R.READ_TAGS, "-@", str(argfile)]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=delai or DELAI_LOT)
+    except subprocess.TimeoutExpired:
+        if len(paths) == 1:
+            raise Delai(f"exiftool ne finit pas de lire {Path(paths[0]).name} ({delai or DELAI_LOT} s) : "
+                        "fichier abîmé ? Mets-le de côté puis relance l'analyse.") from None
+        # Lot trop long : relu fichier par fichier, pour nommer celui qui bloque
+        return [rec for x in paths for rec in _exiftool_list([x], rapide, DELAI_LECTURE)]
     out = p.stdout.strip()
     if not out:
         return []
@@ -78,8 +102,11 @@ def same_ext(a: str, b: str) -> bool:
 
 def content_ext(path: Path) -> str:
     """Extension correspondant au contenu réel du fichier (selon exiftool), '' si inconnu."""
-    p = subprocess.run(["exiftool", "-q", "-q", "-s3", "-FileTypeExtension", str(path)],
-                       capture_output=True, text=True)
+    try:
+        p = _exiftool(["exiftool", "-q", "-q", "-s3", "-FileTypeExtension", str(path)],
+                      DELAI_LECTURE, f"format de {path.name}")
+    except Delai:
+        return ""
     return p.stdout.strip().lower()
 
 
@@ -293,6 +320,23 @@ def convert_and_date(item, nd: dt.datetime):
     return True, f"converti en {final.name} ({mode}), {msg}, {sort}", final
 
 
+def copier_avant_date(path: Path):
+    """3.2.5 (M47) : copie de la photo telle qu'elle était, avant la première écriture de sa date, dans
+    R.AVANT_DATE_DIR (même arborescence que la Pellicule). Une seule fois par fichier : une copie déjà là
+    n'est jamais remplacée. Pas pour les vidéos (une vidéo convertie a sa règle : ORIGINALS_DIR)."""
+    try:
+        rel = path.resolve().relative_to(Path(R.LOCAL_ROOT).resolve())
+    except ValueError:
+        rel = Path(path.name)
+    copie = R.AVANT_DATE_DIR / rel
+    if copie.exists():
+        return
+    copie.parent.mkdir(parents=True, exist_ok=True)
+    tmp = copie.with_name(f".{copie.name}.copie")
+    shutil.copy2(path, tmp)
+    tmp.replace(copie)
+
+
 def write_date(item, nd: dt.datetime):
     E.exiger_ecriture()
     path = Path(item["path"])
@@ -312,22 +356,36 @@ def write_date(item, nd: dt.datetime):
         args += [f"-AllDates={v}", f"-OffsetTimeOriginal={off}", f"-OffsetTimeDigitized={off}",
                  f"-OffsetTime={off}"]
     args += [f"-FileModifyDate={v}{off}", str(path)]
-    p = subprocess.run(args, capture_output=True, text=True)
+    if ext not in R.VIDEO_EXT:
+        try:
+            copier_avant_date(path)
+        except OSError as exc:     # disque plein… : pas d'écriture sans copie
+            return False, f"copie de l'original impossible, date non écrite : {exc}"
+    try:
+        p = _exiftool(args, DELAI_ECRITURE, f"écriture de la date de {path.name}")
+    except Delai as exc:
+        return False, str(exc)
     if p.returncode != 0:
         return False, (p.stderr or p.stdout).strip()[:300]
 
     # sidecars XMP : Immich les lit en priorité
     for sc in (Path(str(path) + ".xmp"), path.with_suffix(".xmp")):
         if sc.exists():
-            subprocess.run(["exiftool", "-overwrite_original", "-q", "-m",
-                            f"-XMP-exif:DateTimeOriginal={v}{off}", f"-XMP-xmp:CreateDate={v}{off}",
-                            str(sc)], capture_output=True, text=True)
+            try:
+                _exiftool(["exiftool", "-overwrite_original", "-q", "-m",
+                           f"-XMP-exif:DateTimeOriginal={v}{off}", f"-XMP-xmp:CreateDate={v}{off}",
+                           str(sc)], DELAI_LECTURE, f"écriture de la date de {sc.name}")
+            except Delai as exc:
+                return False, str(exc)
     return True, ""
 
 
 def verify(item, nd: dt.datetime):
     """Relit le fichier après écriture et compare à la date demandée."""
-    recs = run_exiftool(Path(item["path"]), False)
+    try:
+        recs = run_exiftool(Path(item["path"]), False)
+    except Delai as exc:
+        return False, str(exc)
     if not recs:
         return False, "relecture impossible"
     d, src = pick_date(recs[0])
@@ -343,8 +401,8 @@ def dates_avec_fuseau(path, tags):
     et une CreateDate en heure de Paris peuvent désigner le même instant."""
     cmd = ["exiftool", "-j", "-q", "-q", "-api", "QuickTimeUTC", "-d", "%Y-%m-%d %H:%M:%S%z",
            *[f"-{t}" for t in tags], str(path)]
-    p = subprocess.run(cmd, capture_output=True, text=True)
     try:
+        p = _exiftool(cmd, DELAI_LECTURE, f"lecture de {Path(path).name}")
         rec = json.loads(p.stdout)[0]
     except Exception:
         return {}

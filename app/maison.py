@@ -28,6 +28,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -223,14 +224,38 @@ class Annuaire:
 # ---------------------------------------------------------------- réglages d'usage (contrat 2)
 
 CONTRAT_SAUVEGARDE = 1
-_MOTS_SECRETS = ("password", "motdepasse", "secret", "jeton", "token", "cle", "key", "code", "hash", "webhook",
-                 "identifiant", "login", "user", "email", "courriel")
+# 0.8.2 (audit, M3) : par mots du nom et non plus par morceau (« code_postal » et « mot_cle » ne sont plus écartés
+# à tort ; « mdp », « pwd », « pass » le sont désormais).
+_MOTS_SECRETS = {"password", "passwd", "pass", "pwd", "mdp", "motdepasse", "secret", "jeton", "token", "cle", "key",
+                 "apikey", "code", "hash", "webhook", "identifiant", "login", "user", "username", "email", "courriel",
+                 "dsn", "auth", "authorization", "cookie", "session", "private", "prive"}
+_DANS_LE_NOM = ("password", "motdepasse", "apikey", "webhook", "secret", "token", "jeton")   # même collés (« monTokenX »)
+_INOFFENSIFS = {("code", "postal"), ("code", "pays"), ("code", "couleur"), ("code", "langue"), ("mot", "cle"),
+                ("cle", "tri")}
+_URL_AVEC_IDENTIFIANTS = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+
+
+def _mots(nom: str) -> list[str]:
+    import unicodedata
+    plat = unicodedata.normalize("NFD", nom or "").encode("ascii", "ignore").decode()
+    plat = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", plat).lower()
+    return [m for m in re.split(r"[^a-z0-9]+", plat) if m]
 
 
 def est_secret(nom: str) -> bool:
     """Même esprit que la règle d'Atlas : tout nom qui ressemble à un secret est écarté des sauvegardes."""
-    c = cle(nom)
-    return any(m in c for m in _MOTS_SECRETS)
+    mots = _mots(nom)
+    paires = set(zip(mots, mots[1:]))
+    for i, m in enumerate(mots):
+        if m in _MOTS_SECRETS and not any(p in _INOFFENSIFS for p in paires if m in p):
+            return True
+    colle = "".join(mots)
+    return any(m in colle for m in _DANS_LE_NOM)
+
+
+def valeur_secrete(v) -> bool:
+    """0.8.2 : une valeur qui porte des identifiants (adresse « https://nom:motdepasse@hote ») ne sort jamais."""
+    return isinstance(v, str) and bool(_URL_AVEC_IDENTIFIANTS.search(v))
 
 
 def _convertir(brut: str, modele):
@@ -367,14 +392,21 @@ def reglages_publics(reglages: dict, exclus=()) -> dict:
     """Les réglages qui peuvent sortir de l'appli : ni nom de secret, ni clé exclue par l'appli."""
     ex = {cle(e) for e in exclus}
     return {k: v for k, v in (reglages or {}).items()
-            if not est_secret(k) and cle(k) not in ex and _json_simple(v)}
+            if not est_secret(k) and cle(k) not in ex and _json_simple(v) and not valeur_secrete(v)}
+
+
+def reglages_ecartes(reglages: dict, exclus=()) -> list[str]:
+    """0.8.2 (M3) : les noms des réglages écartés comme secrets (jamais leur valeur), pour le dire à l'écran.
+    Les réglages exclus exprès par l'appli (« exclus ») n'y figurent pas : ils ne sont pas à sauvegarder."""
+    publics = reglages_publics(reglages, exclus)
+    return sorted(k for k in (reglages or {}) if k not in publics and k not in set(exclus))
 
 
 def sauvegarde(appli: str, version: str, reglages: dict, exclus=()) -> dict:
     """Réponse de GET /externe/sauvegarde : réglages et version seulement, jamais de variable ni de secret."""
     return {"contrat": CONTRAT_SAUVEGARDE, "appli": appli, "version": version,
             "le": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "reglages": reglages_publics(reglages, exclus)}
+            "reglages": reglages_publics(reglages, exclus), "ecartes": reglages_ecartes(reglages, exclus)}
 
 
 def differences(actuels: dict, sauves: dict, exclus=()) -> list[dict]:
@@ -411,4 +443,4 @@ def empreinte_calculee(chemin: str | Path | None = None) -> str:
 def empreinte_ecrite(chemin: str | Path | None = None) -> str:
     texte = Path(chemin or __file__).read_text(encoding="utf-8")
     return texte.rsplit("\n# empreinte: ", 1)[-1].strip() if "\n# empreinte: " in texte else ""
-# empreinte: 62b318a5831d093f
+# empreinte: be8c00101be6d7ee

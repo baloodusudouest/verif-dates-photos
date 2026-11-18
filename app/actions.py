@@ -117,7 +117,12 @@ def realign_worker(paths):
             tags = ["CreateDate", "ModifyDate", "TrackCreateDate", "TrackModifyDate", "MediaCreateDate", "MediaModifyDate"]
             args = ["exiftool", "-overwrite_original", "-q", "-m", "-api", "QuickTimeUTC",
                     *[f"-QuickTime:{t}<CreationDate" for t in tags], "-FileModifyDate<CreationDate", p]
-            r = subprocess.run(args, capture_output=True, text=True)
+            try:   # 3.2.5 (M46) : délai maximal
+                r = subprocess.run(args, capture_output=True, text=True, timeout=X.DELAI_ECRITURE)
+            except subprocess.TimeoutExpired:
+                ko.append(f"{Path(p).name} (exiftool n'a pas fini en {X.DELAI_ECRITURE} s)")
+                E.set_progress(done=n)
+                continue
             d = X.dates_avec_fuseau(p, ["CreationDate", "CreateDate"])
             a, b = d.get("CreationDate"), d.get("CreateDate")
             if r.returncode == 0 and a and b and abs((a - b).total_seconds()) <= 60:

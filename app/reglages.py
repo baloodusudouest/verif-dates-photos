@@ -125,6 +125,8 @@ EXT_EQUIV = [{"jpg", "jpeg"}, {"tif", "tiff"}, {"heic", "heif"}, {"mts", "m2ts",
              {"mov", "mp4", "m4v", "3gp", "qt"}]
 CLEANED_DIR = DATA_DIR / "originaux-nettoyes"   # JPEG d'origine avant retrait des octets parasites
 DOUBLONS_DIR = DATA_DIR / "doublons"   # fichiers mal nommés identiques à un fichier déjà présent
+# 3.2.5 (audit, M47) : copie de chaque photo avant la première écriture de sa date (une fois par fichier)
+AVANT_DATE_DIR = DATA_DIR / "originaux-avant-date"
 DATE_PRIORITY = ["DateTimeOriginal", "CreationDate", "CreateDate", "MediaCreateDate"]
 FMT = "%Y-%m-%d %H:%M:%S"
 VALIDATED_FILE = DATA_DIR / "validees.json"

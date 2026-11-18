@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 3.2.5 — 18 novembre 2026 (constats moyens de l'audit)
+- **M46** : chaque appel à exiftool a un délai maximal selon ce qu'il fait (lire un fichier : 120 s ; lire un lot de 100 fichiers : 900 s ; écrire une date : 900 s) ; ffmpeg et ffprobe avaient déjà le leur (3.2.1). Une écriture ou une relecture trop longue est un échec clair pour ce fichier, les autres continuent ; un lot trop long est relu fichier par fichier et l'analyse s'arrête en nommant le fichier qui bloque. Le réalignement des vidéos a le même délai.
+- **M47** : avant la première écriture de sa date, chaque photo est copiée telle quelle dans `originaux-avant-date/` sous le dossier de données de l'appli (`/data`, déjà monté : rien à changer dans la stack), une seule fois par fichier. Si la copie échoue (disque plein…), la date n'est pas écrite. Pas pour les vidéos (une vidéo convertie garde sa règle : `ORIGINALS_DIR`). Ce dossier grossit avec chaque photo corrigée : à vider à la main quand les corrections sont vérifiées.
+- **M48** : `save_corrected` écrivait déjà sous le verrou de sa photographie (3.2.1) ; `save_validated` et `save_results` le font maintenant aussi (même défaut : une photographie ancienne pouvait écraser une plus récente).
+- `maison.py` du socle 0.8.2 (audit M3) : réglages secrets reconnus par mots, adresse avec identifiant écartée, champ `ecartes` dans la sauvegarde (noms seulement).
+
 ## 3.2.4 — 18 novembre 2026 (cookies Secure)
 - **Cookies `Secure` en https** (audit du 17/11/2026, même correctif dans toutes les applis maison) : ouverte en https (directement, derrière Tailscale Serve qui le dit par `X-Forwarded-Proto`, ou d'après l'origine de la page), l'appli pose ses cookies de session avec l'attribut `Secure` : ils ne partent jamais en clair. En http (adresse locale), rien ne change.
 

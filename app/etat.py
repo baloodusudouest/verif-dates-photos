@@ -129,9 +129,9 @@ def load_validated():
 
 
 def save_validated():
-    with LOCK:   # copie figée : le dictionnaire peut changer pendant l'écriture
-        texte = json.dumps(VALIDATED, ensure_ascii=False)
-    ecrire_json(R.VALIDATED_FILE, texte)
+    # 3.2.5 (M48) : photographie et écriture sous le même verrou, comme save_corrected
+    with LOCK:
+        ecrire_json(R.VALIDATED_FILE, json.dumps(VALIDATED, ensure_ascii=False))
 
 
 def load_corrected():
@@ -169,10 +169,10 @@ def save_cache(files):
 
 
 def save_results():
+    # 3.2.5 (M48) : photographie et écriture sous le même verrou, comme save_corrected
     with LOCK:
-        texte = json.dumps({k: STATE.get(k) for k in ("items", "stats", "immich", "scanned_at", "folders")},
-                           ensure_ascii=False)
-    ecrire_json(R.RESULTS_FILE, texte)
+        ecrire_json(R.RESULTS_FILE, json.dumps(
+            {k: STATE.get(k) for k in ("items", "stats", "immich", "scanned_at", "folders")}, ensure_ascii=False))
 
 
 def load_results():
