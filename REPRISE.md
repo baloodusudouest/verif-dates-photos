@@ -6,6 +6,7 @@ Fichier à lire en premier dans une nouvelle session, et à mettre à jour à ch
 
 ## État (16/11/2026)
 
+- **3.3.0** (18/11/2026, santé des tâches de fond, socle 0.9.0) : `/health` fusionne `maison.sante(...)` (`version_socle`, `taches`, `copie_base` = null : pas de base). Tâches à la demande dans `maison.TACHES` : `analyse` (`analyse.scan_worker`), `corrections` (`actions.apply_worker`), `realignement` (`actions.realign_worker`), déclarées par `main.declarer_taches`. Le registre vit en mémoire : **un seul worker uvicorn** (c'est déjà le cas dans le Dockerfile). Dans les tests, remplacer un nom par `monkeypatch.setattr(app.module_de("NOM"), "NOM", …)`. Jamais essayé sur la vraie installation.
 - **3.2.5** (18/11/2026, constats moyens de l'audit) : délais d'exiftool (`exif.DELAI_LECTURE`, `DELAI_LOT`, `DELAI_ECRITURE`, exception `exif.Delai`) ; copie de chaque photo avant sa première date dans `R.AVANT_DATE_DIR` (`/data/originaux-avant-date`, `exif.copier_avant_date`) ; `save_validated` et `save_results` écrivent sous `LOCK`. Les tests ont besoin d'exiftool (sinon sautés). **Jamais essayé sur la vraie installation** ; surveiller la place prise par `/data/originaux-avant-date`.
 - **3.2.0** (16/11/2026) : réglages dans l'appli, sauvegarde et restauration ; anciens noms retirés. **Jamais essayé sur la vraie installation.**
   - `app/maison.py` : contrat 2 du socle, copié tel quel (test d'empreinte).

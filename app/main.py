@@ -23,6 +23,7 @@ from . import reglages as R
 from . import etat as E
 from . import immich as I
 from . import actions as C
+from . import analyse as A
 from . import maison
 from .auth import COMMUN, DUREE, Sessions, en_https
 
@@ -64,12 +65,23 @@ async def cycle(app: FastAPI):
     E.load_corrected()
     E.load_validated()
     noter_reprises()
+    declarer_taches()
     if not R.SCAN_DIR.is_dir():
         print(f"ATTENTION : dossier introuvable {R.SCAN_DIR}")
     yield
 
 
 app = FastAPI(title="Éphéméride", version=__version__, lifespan=cycle, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def declarer_taches() -> None:
+    """3.3.0 : tâches suivies dans /health (maison.TACHES, socle 0.9.0 ; un seul worker uvicorn). Toutes à la
+    demande : l'outil n'a aucune boucle régulière."""
+    for nom in (A.TACHE_ANALYSE, C.TACHE_CORRECTIONS, C.TACHE_REALIGNEMENT):
+        maison.TACHES.declarer(nom, type="demande")
+
+
+declarer_taches()        # aussi à l'import : /health les montre même sans cycle de démarrage
 
 
 def noter_reprises() -> None:
@@ -110,12 +122,16 @@ async def _refus(_: Request, exc: C.Refus):
 # ================================================================ public
 
 @app.get("/health")
-def sante():
-    """Pour la tuile de l'Anneau : des nombres, aucun nom de fichier ni de dossier."""
+def sante(request: Request):
+    """Pour la tuile de l'Anneau : des nombres, aucun nom de fichier ni de dossier.
+    3.3.0 : + version_socle, taches, copie_base (null : pas de base SQLite) ; les messages d'erreur des tâches
+    seulement avec le jeton commun (MAISON_JETON) ou une session valide."""
     with E.LOCK:
         a_traiter = sum(1 for it in E.STATE["items"] if not (it.get("result") or {}).get("ok"))
         en_cours = bool(E.STATE.get("running"))
-    return {"ok": True, "version": __version__, "a_traiter": a_traiter, "en_cours": en_cours}
+    session_ok = bool(R.PASSWORD) and sessions().connecte(request.cookies)
+    return {"ok": True, "version": __version__, "a_traiter": a_traiter, "en_cours": en_cours,
+            **maison.sante(request, jeton_commun=maison.jetons(), session_ok=session_ok)}
 
 
 @app.get("/api/session")

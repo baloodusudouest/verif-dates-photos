@@ -519,7 +519,11 @@ def test_111_rien_sans_mot_de_passe(app, monkeypatch):
     assert anonyme.get("/api/etat").status_code == 503
     assert anonyme.post("/api/connexion", json={"mot_de_passe": ""}).status_code == 503
     # /health ne donne que des nombres : aucun nom de fichier ni de dossier
-    assert set(anonyme.get("/health").json()) == {"ok", "version", "a_traiter", "en_cours"}
+    # 3.3.0 : + version_socle, taches (sans message sans jeton), copie_base
+    sante = anonyme.get("/health").json()
+    assert set(sante) == {"ok", "version", "a_traiter", "en_cours", "version_socle", "taches", "copie_base"}
+    assert all(set(t) == {"nom", "type", "periode_s", "etat", "derniere_reussite", "dernier_essai", "derniere_erreur"}
+               for t in sante["taches"])
 
 
 @pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool absent")

@@ -1,4 +1,5 @@
-"""Module commun des applis maison — contrat 2 (16/11/2026 ; contrat 1 : variables communes, contrat 2 : réglages et sauvegarde).
+"""Module commun des applis maison — contrat 2 (16/11/2026 ; contrat 1 : variables communes, contrat 2 : réglages et sauvegarde),
+socle 0.9.0 (18/11/2026 : santé des tâches de fond et copie cohérente des bases, voir VERSION_SOCLE).
 
 Fichier de référence : baloodusudouest/socle, app/maison.py. Il est copié TEL QUEL dans chaque appli
 (tools/diffuser_maison.py) ; ne jamais le modifier ailleurs que dans le socle. La dernière ligne porte une
@@ -18,25 +19,37 @@ chaque nuit ; « Restaurer » relit une sauvegarde chez l'Anneau (lire_sauvegard
 Jamais de secret dans une sauvegarde : est_secret() écarte tout nom qui y ressemble, et chaque appli peut en exclure
 d'autres explicitement.
 
+Santé des tâches de fond (0.9.0) : chaque appli déclare ses boucles dans TACHES (registre unique du module) et
+entoure chaque tour de « with TACHES.tour(nom): » (ou « async with TACHES.tour_async(nom): ») ; /health fusionne
+sante(request, ...) : version_socle, taches (état de chaque tâche, messages d'erreur seulement avec le jeton commun
+ou une session), copie_base (dernière copie cohérente des bases SQLite, faite chaque nuit par planifier_copie).
+UN SEUL WORKER UVICORN : le registre et la dernière copie vivent en mémoire du processus (avec plusieurs workers,
+chacun aurait le sien et /health dirait n'importe quoi). Le registre repart à vide au démarrage ; la dernière copie
+est relue dans <dossier>/copie.json.
+
 Bibliothèque standard seulement : aucune dépendance ajoutée aux applis.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import contextlib
 import json
+import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 CONTRAT = 2
+VERSION_SOCLE = "0.9.1"      # version du socle d'où vient ce fichier (publiée dans /health : version_socle)
 VRAI = {"oui", "1", "true", "yes", "vrai"}
 FAUX = {"non", "0", "false", "no", "faux"}
 
@@ -432,6 +445,375 @@ def lire_sauvegarde(appli: str, le: str = "", url: str | None = None, jeton: str
         return json.loads(r.read().decode())
 
 
+# ---------------------------------------------------------------- santé des tâches de fond (0.9.0)
+# Registre en mémoire : un seul worker uvicorn (voir l'en-tête du module).
+
+journal = logging.getLogger("maison")
+MARGE_S = 600                 # 10 min de marge avant de dire « en retard » ou de quitter « jamais »
+TOUR_MAX_S = 7200             # un tour qui dure plus que sa période (2 h au plus) est « bloqué »
+LONGUEUR_MESSAGE = 160
+
+# Ce qui ressemble à un secret dans un message d'erreur : remplacé par « … » avant d'être gardé.
+_SECRETS_DANS_TEXTE = (
+    # adresse avec identifiants : https://nom:motdepasse@hote/… (ou https://jeton@hote/…)
+    (re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s/@'\"<>]+@[^\s'\"<>]*", re.I), "…"),
+    # « Bearer xxx », « Basic xxx » (en-tête Authorization recopié dans une erreur)
+    (re.compile(r"\b(bearer|basic)\s+[^\s'\",;]+", re.I), r"\1 …"),
+    # « token=xxx », « api_key: xxx », « password=xxx »… (le nom reste, la valeur part)
+    (re.compile(r"\b([a-z0-9_\-]*(?:token|jeton|password|passwd|pwd|mdp|secret|api[_\-]?key|apikey|key|cle|auth|"
+                r"signature|sig|session|cookie)[a-z0-9_\-]*)(\s*[=:]\s*)(?!…)[^\s&;,'\"<>]+", re.I), r"\1\2…"),
+)
+
+
+def masquer_secrets(texte: str) -> str:
+    """Remplace par « … » toute sous-chaîne qui ressemble à un secret (adresse avec identifiants, « token=… »,
+    « Bearer … »). Prudent exprès : mieux vaut un message trop masqué qu'un secret dans /health."""
+    t = str(texte or "")
+    for motif, remplacement in _SECRETS_DANS_TEXTE:
+        t = motif.sub(remplacement, t)
+    return t
+
+
+def message_erreur(exc: BaseException) -> str:
+    """Type de l'exception + première ligne, secrets masqués, 160 caractères au plus."""
+    lignes = str(exc).strip().splitlines()
+    texte = exc.__class__.__name__ + (": " + lignes[0].strip() if lignes and lignes[0].strip() else "")
+    texte = masquer_secrets(texte)
+    return texte if len(texte) <= LONGUEUR_MESSAGE else texte[:LONGUEUR_MESSAGE - 1] + "…"
+
+
+def _iso(t: float | None) -> str | None:
+    return None if t is None else datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds")
+
+
+class Taches:
+    """Registre des tâches de fond d'une appli (contrat /health 0.9.0).
+
+    declarer(nom, periode_s, type)  « reguliere » (boucle qui revient toutes les periode_s secondes) ou « demande »
+                                    (import, fabrication lancés à la main : jamais d'orange dans l'Anneau) ;
+    with tour(nom): …               marque le début, puis la réussite ou l'erreur (l'exception repart telle quelle) ;
+    async with tour_async(nom): …   même chose dans une coroutine ; une annulation (arrêt de l'appli) n'est pas
+                                    une erreur ;
+    etat(avec_messages)             liste au format du contrat.
+
+    États d'une tâche régulière : « bloquee » si un tour dure depuis plus de min(période, 2 h) ; « ok » si la
+    dernière réussite a moins de 2 × période + 10 min ; « jamais » si aucun tour fini depuis le démarrage et
+    démarrage il y a moins de période + 10 min ; sinon « en_retard » (erreur, boucle morte…).
+    Tâche à la demande : « ok », « erreur » (dernier tour échoué) ou « jamais ».
+    `horloge` (secondes depuis 1970) se remplace dans les tests.
+    """
+
+    def __init__(self, horloge=time.time):
+        self.horloge = horloge
+        self._verrou = threading.Lock()
+        self._taches: dict[str, dict] = {}
+        self._numero = 0
+
+    def declarer(self, nom: str, periode_s: float | None = None, type: str = "reguliere") -> None:   # noqa: A002
+        if type not in ("reguliere", "demande"):
+            raise ValueError("type « reguliere » ou « demande »")
+        if type == "reguliere" and (not periode_s or periode_s <= 0):
+            raise ValueError(f"tâche régulière « {nom} » sans période")
+        with self._verrou:
+            t = self._taches.get(nom)
+            if t is None:
+                self._taches[nom] = {"type": type, "periode_s": periode_s, "declaree": self.horloge(),
+                                     "en_cours": {}, "derniere_reussite": None, "dernier_essai": None,
+                                     "derniere_erreur": None, "message": "", "dernier": None}
+            else:                      # redéclarée (nouveau démarrage du cycle de vie dans les tests) : garde l'histoire
+                t.update(type=type, periode_s=periode_s)
+
+    def _debut(self, nom: str) -> int:
+        if nom not in self._taches:    # oubli de declarer : suivie comme tâche à la demande plutôt que de casser
+            self.declarer(nom, type="demande")
+        with self._verrou:
+            self._numero += 1
+            t = self._taches[nom]
+            maintenant = self.horloge()
+            t["en_cours"][self._numero] = maintenant
+            t["dernier_essai"] = maintenant
+            return self._numero
+
+    def _fin(self, nom: str, numero: int, exc: BaseException | None, annule: bool = False) -> None:
+        with self._verrou:
+            t = self._taches[nom]
+            t["en_cours"].pop(numero, None)
+            if annule:
+                return
+            maintenant = self.horloge()
+            if exc is None:
+                t["derniere_reussite"] = maintenant
+                t["dernier"] = "ok"
+            else:
+                t["derniere_erreur"] = maintenant
+                t["message"] = message_erreur(exc)
+                t["dernier"] = "erreur"
+
+    @contextlib.contextmanager
+    def tour(self, nom: str):
+        numero = self._debut(nom)
+        try:
+            yield
+        except Exception as exc:
+            self._fin(nom, numero, exc)
+            raise
+        except BaseException:          # KeyboardInterrupt, arrêt : ni réussite ni erreur
+            self._fin(nom, numero, None, annule=True)
+            raise
+        else:
+            self._fin(nom, numero, None)
+
+    @contextlib.asynccontextmanager
+    async def tour_async(self, nom: str):
+        numero = self._debut(nom)
+        try:
+            yield
+        except asyncio.CancelledError:
+            self._fin(nom, numero, None, annule=True)
+            raise
+        except Exception as exc:
+            self._fin(nom, numero, exc)
+            raise
+        except BaseException:
+            self._fin(nom, numero, None, annule=True)
+            raise
+        else:
+            self._fin(nom, numero, None)
+
+    def _etat_de(self, t: dict, maintenant: float) -> str:
+        if t["type"] == "demande":
+            return {"ok": "ok", "erreur": "erreur"}.get(t["dernier"], "jamais")
+        periode = float(t["periode_s"])
+        if t["en_cours"] and maintenant - min(t["en_cours"].values()) > min(periode, TOUR_MAX_S):
+            return "bloquee"
+        if t["derniere_reussite"] is not None and maintenant - t["derniere_reussite"] < 2 * periode + MARGE_S:
+            return "ok"
+        if t["dernier"] is None and maintenant - t["declaree"] < periode + MARGE_S:
+            return "jamais"
+        return "en_retard"
+
+    def etat(self, avec_messages: bool = False) -> list[dict]:
+        with self._verrou:
+            maintenant = self.horloge()
+            sortie = []
+            for nom, t in self._taches.items():
+                e = {"nom": nom, "type": t["type"], "periode_s": t["periode_s"], "etat": self._etat_de(t, maintenant),
+                     "derniere_reussite": _iso(t["derniere_reussite"]), "dernier_essai": _iso(t["dernier_essai"]),
+                     "derniere_erreur": _iso(t["derniere_erreur"])}
+                if avec_messages:
+                    e["message"] = t["message"]
+                sortie.append(e)
+            return sortie
+
+
+TACHES = Taches()
+
+
+# ---------------------------------------------------------------- copie cohérente des bases SQLite (0.9.0)
+
+# Heure de Paris de la copie de nuit, étalée par appli (avant la collecte de l'Anneau à 03:30).
+HEURES_COPIE = {"carnet": "01:00", "gazette": "01:10", "douze-points": "01:20", "sillage": "01:30",
+                "millesime": "01:40", "transhumance": "01:50", "chambre-noire": "02:00", "comptoir": "02:10",
+                "scriptorium": "02:20"}
+TACHE_COPIE = "copie-des-bases"
+_COPIE: dict = {"dossier": None, "dernier": None}
+_COPIE_VERROU = threading.Lock()
+
+
+def _nom_copie(chemin) -> str:
+    return Path(chemin).stem
+
+
+def _ecrire_copie_json(dossier: Path, resultat: dict) -> None:
+    tmp = dossier / "copie.json.tmp"
+    tmp.write_text(json.dumps(resultat, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, dossier / "copie.json")
+
+
+def _retenir_copie(dossier: Path, resultat: dict) -> None:
+    with _COPIE_VERROU:
+        _COPIE.update(dossier=dossier, dernier=resultat)
+    with contextlib.suppress(OSError):
+        _ecrire_copie_json(dossier, resultat)
+
+
+def _ouvrir_sqlite(chemin: Path, lecture_seule: bool = False):
+    """Ouverture par défaut des bases à copier (SQLite en clair)."""
+    if lecture_seule:
+        return sqlite3.connect(Path(chemin).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    return sqlite3.connect(chemin)
+
+
+def copier_bases(chemins, dossier, ouvrir=None) -> dict:
+    """Copie cohérente de chaque base SQLite de l'appli (même pendant une écriture : API de sauvegarde de SQLite),
+    vers <dossier>/<nom>-derniere.db, écrasée à chaque fois (Hyper Backup tient l'historique).
+
+    Toutes les bases d'un coup : chacune est d'abord copiée en <nom>-derniere.db.partiel et vérifiée
+    (PRAGMA integrity_check) ; c'est seulement quand toutes sont bonnes qu'elles remplacent les copies précédentes.
+    Une copie qui échoue l'intégrité est effacée, et l'erreur repart (la tâche passe en erreur). Les copies sont
+    en journal « delete » : un seul fichier par base, sans -wal ni -shm, prêt à remettre en place.
+    0.9.1 : `ouvrir(chemin, lecture_seule)` rend une connexion (défaut : SQLite en clair) ; une appli à base
+    chiffrée (carnet, SQLCipher) passe la sienne : la copie reste chiffrée avec la même clé.
+    Retour (format copie_base de /health) : {"le", "ok", "bases", "taille"} ; gardé en mémoire et dans
+    <dossier>/copie.json. Bloquant : à lancer dans un fil (asyncio.to_thread), jamais dans la boucle du serveur.
+    """
+    ouvrir = ouvrir or _ouvrir_sqlite
+    dossier = Path(dossier)
+    chemins = [Path(c) for c in chemins]
+    noms = [_nom_copie(c) for c in chemins]
+    if len(set(noms)) != len(noms):
+        raise ValueError("deux bases portent le même nom : copies impossibles à distinguer")
+    bases = [c.name for c in chemins]
+    partiels: list[Path] = []
+    try:
+        dossier.mkdir(parents=True, exist_ok=True)
+        for chemin, nom in zip(chemins, noms):
+            if not chemin.is_file():
+                raise FileNotFoundError(f"base absente : {chemin.name}")
+            partiel = dossier / f"{nom}-derniere.db.partiel"
+            partiels.append(partiel)
+            with contextlib.suppress(FileNotFoundError):
+                partiel.unlink()
+            # lecture seule : la copie ne crée jamais une base vide à la place d'une base disparue
+            src = ouvrir(chemin, True)
+            try:
+                dst = ouvrir(partiel, False)
+                try:
+                    src.backup(dst)            # en une seule étape : instantané cohérent de la base
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            verif = ouvrir(partiel, False)
+            try:
+                verif.execute("PRAGMA journal_mode=DELETE").fetchall()
+                lignes = [r[0] for r in verif.execute("PRAGMA integrity_check").fetchall()]
+            finally:
+                verif.close()
+            if lignes != ["ok"]:
+                raise sqlite3.DatabaseError(f"copie de {chemin.name} abîmée (integrity_check : {lignes[:1]})")
+        taille = 0
+        for partiel, nom in zip(partiels, noms):
+            final = dossier / f"{nom}-derniere.db"
+            os.replace(partiel, final)
+            taille += final.stat().st_size
+    except BaseException:
+        for partiel in partiels:
+            with contextlib.suppress(OSError):
+                partiel.unlink()
+        if dossier.is_dir():
+            _retenir_copie(dossier, {"le": _iso(time.time()), "ok": False, "bases": bases, "taille": 0})
+        raise
+    resultat = {"le": _iso(time.time()), "ok": True, "bases": bases, "taille": taille}
+    _retenir_copie(dossier, resultat)
+    return resultat
+
+
+def copie_base_etat() -> dict | None:
+    """Dernière copie connue (format copie_base de /health) ; None pour une appli sans base (aucune copie prévue).
+    Copie prévue mais jamais faite : {"le": None, "ok": False, …}."""
+    with _COPIE_VERROU:
+        return None if _COPIE["dernier"] is None else dict(_COPIE["dernier"])
+
+
+def _charger_copie(dossier: Path, bases: list[str]) -> None:
+    """Au démarrage : reprend la dernière copie dans <dossier>/copie.json (survit au redémarrage)."""
+    try:
+        lu = json.loads((dossier / "copie.json").read_text(encoding="utf-8"))
+        if not isinstance(lu, dict) or "ok" not in lu:
+            raise ValueError
+        resultat = {"le": lu.get("le"), "ok": bool(lu.get("ok")), "bases": list(lu.get("bases") or bases),
+                    "taille": int(lu.get("taille") or 0)}
+    except (OSError, ValueError, TypeError):
+        resultat = {"le": None, "ok": False, "bases": bases, "taille": 0}
+    with _COPIE_VERROU:
+        _COPIE.update(dossier=dossier, dernier=resultat)
+
+
+# Heure de Paris sans dépendre du TZ du conteneur. zoneinfo d'abord ; s'il manque les données de fuseau
+# (image sans tzdata), règle européenne : heure d'été du dernier dimanche de mars au dernier dimanche
+# d'octobre, 01:00 UTC.
+try:
+    from zoneinfo import ZoneInfo
+    PARIS = ZoneInfo("Europe/Paris")
+except Exception:                      # noqa: BLE001 — pas de données de fuseau dans l'image
+    PARIS = None
+
+
+def _dernier_dimanche(annee: int, mois: int) -> date:
+    d = date(annee, mois + 1, 1) - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - 6) % 7)
+
+
+def _decalage_paris(utc: datetime) -> timedelta:
+    """Décalage de Paris à l'instant UTC donné (repli sans zoneinfo)."""
+    debut = datetime.combine(_dernier_dimanche(utc.year, 3), datetime.min.time(), timezone.utc) + timedelta(hours=1)
+    fin = datetime.combine(_dernier_dimanche(utc.year, 10), datetime.min.time(), timezone.utc) + timedelta(hours=1)
+    return timedelta(hours=2 if debut <= utc < fin else 1)
+
+
+def prochaine_copie(heure_paris: str, maintenant: datetime | None = None, paris=...) -> datetime:
+    """Prochain instant (en UTC) où il est « HH:MM » à Paris, strictement après maintenant (UTC par défaut).
+    Une heure qui n'existe pas (passage à l'heure d'été) tombe une heure plus tard."""
+    zone = PARIS if paris is ... else paris
+    h, m = (int(x) for x in heure_paris.split(":"))
+    utc = (maintenant or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    for jours in range(0, 3):
+        if zone is not None:
+            jour = utc.astimezone(zone).date() + timedelta(days=jours)
+            cible = datetime(jour.year, jour.month, jour.day, h, m, tzinfo=zone).astimezone(timezone.utc)
+        else:
+            jour = (utc + _decalage_paris(utc)).date() + timedelta(days=jours)
+            local = datetime(jour.year, jour.month, jour.day, h, m, tzinfo=timezone.utc)   # heure de Paris « nue »
+            cible = local - timedelta(hours=1)                 # hiver, et heure qui n'existe pas (une heure plus tard)
+            if _decalage_paris(local - timedelta(hours=2)) == timedelta(hours=2):
+                cible = local - timedelta(hours=2)             # été
+        if cible > utc:
+            return cible
+    raise RuntimeError("heure de copie introuvable")       # impossible : un jour plus tard convient toujours
+
+
+async def planifier_copie(appli: str, chemins, dossier, heure_paris: str | None = None, *, dormir=asyncio.sleep,
+                          tours: int | None = None, ouvrir=None) -> None:
+    """Boucle de nuit : à l'heure de Paris de l'appli (HEURES_COPIE), copier_bases dans un fil à part, sous la tâche
+    régulière « copie-des-bases » (24 h) du registre. Une copie ratée est notée (tâche en retard, copie_base ok:
+    false) et la boucle continue. À lancer au démarrage : asyncio.create_task(maison.planifier_copie(...)).
+    `dormir` et `tours` servent aux tests."""
+    heure = heure_paris or HEURES_COPIE[appli]
+    dossier = Path(dossier)
+    chemins = [Path(c) for c in chemins]
+    TACHES.declarer(TACHE_COPIE, 86400)
+    _charger_copie(dossier, [c.name for c in chemins])
+    fait = 0
+    while tours is None or fait < tours:
+        cible = prochaine_copie(heure)
+        # par morceaux d'une heure au plus : une horloge qui saute (veille du NAS, réglage) ne fait pas rater la nuit
+        while (reste := (cible - datetime.now(timezone.utc)).total_seconds()) > 0:
+            await dormir(min(reste, 3600))
+        try:
+            async with TACHES.tour_async(TACHE_COPIE):
+                await asyncio.to_thread(copier_bases, chemins, dossier, ouvrir)
+        except Exception as exc:       # noqa: BLE001 — la boucle de nuit ne meurt pas d'une copie ratée
+            journal.warning("%s : copie des bases ratée (%s)", appli, message_erreur(exc))
+        fait += 1
+
+
+def sante(request=None, jeton_commun=None, session_ok: bool = False) -> dict:
+    """Champs à ajouter au /health de l'appli (rien d'existant ne change) :
+    {"version_socle", "taches", "copie_base"}. Les messages d'erreur des tâches n'y sont que si la requête porte
+    le jeton commun (Authorization: Bearer …, comparé en temps constant) ou si session_ok (session valide) ;
+    sinon la clé « message » est absente. jeton_commun : jetons acceptés (défaut : maison.jetons())."""
+    if isinstance(jeton_commun, str):
+        acceptes: tuple = (jeton_commun,) if jeton_commun else ()
+    else:
+        acceptes = tuple(jeton_commun) if jeton_commun is not None else jetons()
+    autorise = bool(session_ok)
+    if not autorise and request is not None:
+        autorise = jeton_valide(jeton_propose(request.headers), acceptes)
+    return {"version_socle": VERSION_SOCLE, "taches": TACHES.etat(avec_messages=autorise),
+            "copie_base": copie_base_etat()}
+
+
 # ---------------------------------------------------------------- empreinte (copie non retouchée)
 
 def empreinte_calculee(chemin: str | Path | None = None) -> str:
@@ -443,4 +825,4 @@ def empreinte_calculee(chemin: str | Path | None = None) -> str:
 def empreinte_ecrite(chemin: str | Path | None = None) -> str:
     texte = Path(chemin or __file__).read_text(encoding="utf-8")
     return texte.rsplit("\n# empreinte: ", 1)[-1].strip() if "\n# empreinte: " in texte else ""
-# empreinte: be8c00101be6d7ee
+# empreinte: 8e043b183229aa14

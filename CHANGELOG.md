@@ -1,5 +1,12 @@
 # Journal des versions
 
+## 3.3.0 — 18 novembre 2026 (santé des tâches de fond)
+- **`/health` dit l'état des tâches** (module commun `maison.py`, socle 0.9.1) ; les anciens champs (`ok`, `version`, `a_traiter`, `en_cours`) ne changent pas. Nouveaux champs : `version_socle`, `taches`, `copie_base`.
+- Tâches suivies, toutes à la demande (l'outil n'a aucune boucle régulière) : **analyse** (« Tout analyser », « Scanner les nouveaux », et l'analyse qui suit un renommage de dossier), **corrections** (écriture des dates) et **realignement** (vidéos). Une tâche qui plante passe en « erreur » ; elle ne met jamais la tuile de l'Anneau en orange.
+- Les messages d'erreur des tâches ne sortent qu'avec le jeton commun (`MAISON_JETON`) ou une session ouverte ; jamais de nom de fichier sans eux.
+- Copie des bases : aucune (pas de base SQLite) ; `copie_base` vaut `null`.
+- Comportement inchangé : une tâche qui plante montre toujours son erreur à l'écran comme avant.
+
 ## 3.2.5 — 18 novembre 2026 (constats moyens de l'audit)
 - **M46** : chaque appel à exiftool a un délai maximal selon ce qu'il fait (lire un fichier : 120 s ; lire un lot de 100 fichiers : 900 s ; écrire une date : 900 s) ; ffmpeg et ffprobe avaient déjà le leur (3.2.1). Une écriture ou une relecture trop longue est un échec clair pour ce fichier, les autres continuent ; un lot trop long est relu fichier par fichier et l'analyse s'arrête en nommant le fichier qui bloque. Le réalignement des vidéos a le même délai.
 - **M47** : avant la première écriture de sa date, chaque photo est copiée telle quelle dans `originaux-avant-date/` sous le dossier de données de l'appli (`/data`, déjà monté : rien à changer dans la stack), une seule fois par fichier. Si la copie échoue (disque plein…), la date n'est pas écrite. Pas pour les vidéos (une vidéo convertie garde sa règle : `ORIGINALS_DIR`). Ce dossier grossit avec chaque photo corrigée : à vider à la main quand les corrections sont vérifiées.

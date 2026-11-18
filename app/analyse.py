@@ -9,7 +9,11 @@ from . import etat as E
 from . import dates as D
 from . import exif as X
 from . import immich as I
+from . import maison
 
+
+# 3.3.0 : tâche à la demande suivie dans /health (maison.TACHES, socle 0.9.0)
+TACHE_ANALYSE = "analyse"
 
 STATUS_KEY = {"écart": "ecart", "sans date": "sans_date", "à trancher": "a_trancher", "abîmé": "abime"}
 
@@ -157,129 +161,130 @@ def apply_neighbors(items, voisins):
 def scan_worker(mode="tout"):
     """mode « tout » : tout relire ; mode « nouveaux » : seuls les fichiers nouveaux ou modifiés."""
     try:
-        stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "abime": 0, "sans_ref": 0}
-        meta = E.load_meta()
-        fichiers_prev = meta.get("files_total")
-        estime = lambda n, cle: (n * meta[cle]) if (n and meta.get(cle) is not None) else None
-        with E.LOCK:
-            E.STATE["steps"] = [
-                {"key": "index", "label": "1/3 · Lecture de l'index Immich", "status": "todo",
-                 "estimate": None if not I.immich_enabled() else estime(meta.get("index_total"), "index_rate")},
-                {"key": "walk", "label": "2/3 · Recensement des fichiers", "status": "todo",
-                 "estimate": estime(fichiers_prev, "walk_rate")},
-                {"key": "analyse", "label": "3/3 · Analyse des dates", "status": "todo",
-                 "estimate": estime(fichiers_prev, "analyse_rate") if mode == "tout" else None},
-            ]
-            if not I.immich_enabled():
-                E.STATE["steps"][0].update(status="skipped")
-
-        t0 = E.now_ts()
-        immich_idx, immich_msg, nb_immich = I.immich_index(meta)
-        duree_index = E.step_end("index")
-
-        E.step_start("walk", total=fichiers_prev or 0, total_estime=bool(fichiers_prev))
-        E.set_progress(immich=immich_msg)
-
-        def avance(n, dossier):
+        with maison.TACHES.tour(TACHE_ANALYSE):
+            stats = {"fichiers": 0, "ok": 0, "ecart": 0, "sans_date": 0, "a_trancher": 0, "abime": 0, "sans_ref": 0}
+            meta = E.load_meta()
+            fichiers_prev = meta.get("files_total")
+            estime = lambda n, cle: (n * meta[cle]) if (n and meta.get(cle) is not None) else None
             with E.LOCK:
-                if E.STATE["total"] and n > E.STATE["total"]:
-                    E.STATE["total"] = n
-                try:
-                    E.STATE.update(done=n, progress=str(Path(dossier).relative_to(R.LOCAL_ROOT)))
-                except ValueError:
-                    E.STATE.update(done=n)
-        files = X.list_files(avance)
-        duree_walk = E.step_end("walk")
-        old_cache = E.load_cache() if mode == "nouveaux" else {}
-        new_cache, items, to_scan, reused = {}, [], [], 0
-        voisins = {}   # dossier → [(chemin, date, cohérente)]
-        for f in files:
-            sig = X.file_sig(f)
-            entry = old_cache.get(str(f))
-            if sig and entry and entry.get("sig") == sig:
-                # fichier inchangé depuis la dernière analyse : résultat repris tel quel
-                reused += 1
-                for k, v in entry["stats"].items():
-                    stats[k] += v
-                item = entry.get("item")
-                if item:
-                    item = dict(item, result=None)
-                    if immich_idx:   # l'index Immich a pu changer : id et date relus
-                        hit = immich_idx.get(I.to_immich_path(f))
-                        item["immich_id"], item["immich_date"] = (
-                            (hit[0], (hit[1] or "")[:16].replace("T", " ")) if hit else (None, ""))
-                    items.append(item)
-                if entry.get("v"):
-                    voisins.setdefault(entry["v"][0], []).append((str(f), entry["v"][1], entry["v"][2]))
-                new_cache[str(f)] = entry
-            else:
-                to_scan.append(f)
+                E.STATE["steps"] = [
+                    {"key": "index", "label": "1/3 · Lecture de l'index Immich", "status": "todo",
+                     "estimate": None if not I.immich_enabled() else estime(meta.get("index_total"), "index_rate")},
+                    {"key": "walk", "label": "2/3 · Recensement des fichiers", "status": "todo",
+                     "estimate": estime(fichiers_prev, "walk_rate")},
+                    {"key": "analyse", "label": "3/3 · Analyse des dates", "status": "todo",
+                     "estimate": estime(fichiers_prev, "analyse_rate") if mode == "tout" else None},
+                ]
+                if not I.immich_enabled():
+                    E.STATE["steps"][0].update(status="skipped")
 
-        E.step_estimate("analyse", estime(len(to_scan), "analyse_rate"))
-        if mode == "nouveaux":
+            t0 = E.now_ts()
+            immich_idx, immich_msg, nb_immich = I.immich_index(meta)
+            duree_index = E.step_end("index")
+
+            E.step_start("walk", total=fichiers_prev or 0, total_estime=bool(fichiers_prev))
+            E.set_progress(immich=immich_msg)
+
+            def avance(n, dossier):
+                with E.LOCK:
+                    if E.STATE["total"] and n > E.STATE["total"]:
+                        E.STATE["total"] = n
+                    try:
+                        E.STATE.update(done=n, progress=str(Path(dossier).relative_to(R.LOCAL_ROOT)))
+                    except ValueError:
+                        E.STATE.update(done=n)
+            files = X.list_files(avance)
+            duree_walk = E.step_end("walk")
+            old_cache = E.load_cache() if mode == "nouveaux" else {}
+            new_cache, items, to_scan, reused = {}, [], [], 0
+            voisins = {}   # dossier → [(chemin, date, cohérente)]
+            for f in files:
+                sig = X.file_sig(f)
+                entry = old_cache.get(str(f))
+                if sig and entry and entry.get("sig") == sig:
+                    # fichier inchangé depuis la dernière analyse : résultat repris tel quel
+                    reused += 1
+                    for k, v in entry["stats"].items():
+                        stats[k] += v
+                    item = entry.get("item")
+                    if item:
+                        item = dict(item, result=None)
+                        if immich_idx:   # l'index Immich a pu changer : id et date relus
+                            hit = immich_idx.get(I.to_immich_path(f))
+                            item["immich_id"], item["immich_date"] = (
+                                (hit[0], (hit[1] or "")[:16].replace("T", " ")) if hit else (None, ""))
+                        items.append(item)
+                    if entry.get("v"):
+                        voisins.setdefault(entry["v"][0], []).append((str(f), entry["v"][1], entry["v"][2]))
+                    new_cache[str(f)] = entry
+                else:
+                    to_scan.append(f)
+
+            E.step_estimate("analyse", estime(len(to_scan), "analyse_rate"))
+            if mode == "nouveaux":
+                with E.LOCK:
+                    E.STATE["steps"][2]["label"] = (f"3/3 · Analyse des dates — {len(to_scan):,} nouveaux ou modifiés, "
+                                                  f"{reused:,} repris").replace(",", " ")
+            E.step_start("analyse", total=len(to_scan))
+            t_analyse = E.now_ts()
+            for i in range(0, len(to_scan), R.CHUNK):
+                chunk = to_scan[i:i + R.CHUNK]
+                E.set_progress(progress=str(chunk[0].parent.relative_to(R.LOCAL_ROOT)))
+                for rec in X.run_exiftool_files(chunk):
+                    before = dict(stats)
+                    item = analyse_record(rec, immich_idx, stats)
+                    if item:
+                        items.append(item)
+                    path = Path(rec["SourceFile"])
+                    v = neighbor_info(rec)
+                    if v:
+                        voisins.setdefault(v[0], []).append((str(path), v[1], v[2]))
+                    sig = X.file_sig(path)
+                    if sig:
+                        delta = {k: stats[k] - before[k] for k in stats if stats[k] != before[k]}
+                        new_cache[str(path)] = {"sig": sig, "stats": delta, "item": item, "v": v}
+                E.set_progress(done=i + len(chunk))
+
+            apply_neighbors(items, voisins)
+            gardes = []
+            for it in items:   # photos validées telles quelles : plus signalées tant que le fichier n'a pas changé
+                sig = E.VALIDATED.get(it["path"])
+                if sig and sig == X.file_sig(Path(it["path"])):
+                    stats[STATUS_KEY.get(it["status"], "ecart")] -= 1
+                    stats["valide"] = stats.get("valide", 0) + 1
+                else:
+                    gardes.append(it)
+            items = gardes
+            dossiers_signales = {it["folder"] for it in items}
+            folders = {}
+            for dossier in dossiers_signales:
+                prop = D.propose_folder(dossier, voisins.get(dossier, []))
+                if prop:
+                    folders[dossier] = prop
+            for it in items:   # photo déjà corrigée mais toujours en écart : signalée à nouveau
+                rec = E.CORRECTED.get(it["path"])
+                it["deja"] = rec["quand"] if rec else ""
+            items.sort(key=lambda it: (it["folder"], it["name"]))
             with E.LOCK:
-                E.STATE["steps"][2]["label"] = (f"3/3 · Analyse des dates — {len(to_scan):,} nouveaux ou modifiés, "
-                                              f"{reused:,} repris").replace(",", " ")
-        E.step_start("analyse", total=len(to_scan))
-        t_analyse = E.now_ts()
-        for i in range(0, len(to_scan), R.CHUNK):
-            chunk = to_scan[i:i + R.CHUNK]
-            E.set_progress(progress=str(chunk[0].parent.relative_to(R.LOCAL_ROOT)))
-            for rec in X.run_exiftool_files(chunk):
-                before = dict(stats)
-                item = analyse_record(rec, immich_idx, stats)
-                if item:
-                    items.append(item)
-                path = Path(rec["SourceFile"])
-                v = neighbor_info(rec)
-                if v:
-                    voisins.setdefault(v[0], []).append((str(path), v[1], v[2]))
-                sig = X.file_sig(path)
-                if sig:
-                    delta = {k: stats[k] - before[k] for k in stats if stats[k] != before[k]}
-                    new_cache[str(path)] = {"sig": sig, "stats": delta, "item": item, "v": v}
-            E.set_progress(done=i + len(chunk))
-
-        apply_neighbors(items, voisins)
-        gardes = []
-        for it in items:   # photos validées telles quelles : plus signalées tant que le fichier n'a pas changé
-            sig = E.VALIDATED.get(it["path"])
-            if sig and sig == X.file_sig(Path(it["path"])):
-                stats[STATUS_KEY.get(it["status"], "ecart")] -= 1
-                stats["valide"] = stats.get("valide", 0) + 1
-            else:
-                gardes.append(it)
-        items = gardes
-        dossiers_signales = {it["folder"] for it in items}
-        folders = {}
-        for dossier in dossiers_signales:
-            prop = D.propose_folder(dossier, voisins.get(dossier, []))
-            if prop:
-                folders[dossier] = prop
-        for it in items:   # photo déjà corrigée mais toujours en écart : signalée à nouveau
-            rec = E.CORRECTED.get(it["path"])
-            it["deja"] = rec["quand"] if rec else ""
-        items.sort(key=lambda it: (it["folder"], it["name"]))
-        with E.LOCK:
-            E.STATE.update(items=items, stats=stats, folders=folders, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
-                         progress="Terminé", error=None, last_mode=mode,
-                         messages=([f"Analyse incrémentale : {len(to_scan)} fichier(s) relu(s), "
-                                    f"{reused} repris de l'analyse précédente."] if mode == "nouveaux" else []))
-            E.ITEMS.clear()
-            E.ITEMS.update({it["id"]: it for it in items})
-        duree_analyse = E.now_ts() - t_analyse
-        E.step_end("analyse")
-        # mesures pour estimer la prochaine analyse
-        if nb_immich and duree_index:
-            meta.update(index_total=nb_immich, index_rate=duree_index / nb_immich)
-        if files and duree_walk is not None:
-            meta.update(files_total=len(files), walk_rate=duree_walk / len(files))
-        if len(to_scan) >= 50:
-            meta.update(analyse_rate=duree_analyse / len(to_scan))
-        meta["last_total_s"] = round(E.now_ts() - t0)
-        E.save_meta(meta)
-        E.save_cache(new_cache)
-        E.save_results()
+                E.STATE.update(items=items, stats=stats, folders=folders, scanned_at=dt.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                             progress="Terminé", error=None, last_mode=mode,
+                             messages=([f"Analyse incrémentale : {len(to_scan)} fichier(s) relu(s), "
+                                        f"{reused} repris de l'analyse précédente."] if mode == "nouveaux" else []))
+                E.ITEMS.clear()
+                E.ITEMS.update({it["id"]: it for it in items})
+            duree_analyse = E.now_ts() - t_analyse
+            E.step_end("analyse")
+            # mesures pour estimer la prochaine analyse
+            if nb_immich and duree_index:
+                meta.update(index_total=nb_immich, index_rate=duree_index / nb_immich)
+            if files and duree_walk is not None:
+                meta.update(files_total=len(files), walk_rate=duree_walk / len(files))
+            if len(to_scan) >= 50:
+                meta.update(analyse_rate=duree_analyse / len(to_scan))
+            meta["last_total_s"] = round(E.now_ts() - t0)
+            E.save_meta(meta)
+            E.save_cache(new_cache)
+            E.save_results()
     except Exception as exc:
         E.set_progress(error=str(exc))
     finally:

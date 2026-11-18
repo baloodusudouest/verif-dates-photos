@@ -176,7 +176,8 @@ def test_portes_api_fermees_au_jeton_commun(env, monkeypatch):
     c = TestClient(m.app)
     for chemin in ("/api/etat", "/api/reglages", "/api/restaurer", "/api/journal.csv"):
         assert c.get(chemin, headers={"Authorization": f"Bearer {JETON}"}).status_code == 401, chemin
-    assert set(c.get("/health").json()) == {"ok", "version", "a_traiter", "en_cours"}
+    assert set(c.get("/health").json()) == {"ok", "version", "a_traiter", "en_cours",
+                                            "version_socle", "taches", "copie_base"}       # 3.3.0
 
 
 # ---------------------------------------------------------------- restauration
